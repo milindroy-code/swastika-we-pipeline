@@ -161,18 +161,18 @@ category_stage:
   "New - no deposit (16-30 days)": kyc_no_deposit
 
 team:
-  # PLACEHOLDER NAMES: replace with the real team.
+  # DUMMY TEAM for now: replace with the real people before go-live.
   # role: gm  = Growth Manager, does the calling and gets leads (capacity = max open leads)
   #       sm  = Service Manager, mentors their GMs, receives escalations and team reports
   # sm:   the id of the GM's Service Manager
   # categories: optional; GMs listed against a lead category get those leads first.
-  - { id: sm_priya, name: Priya Sharma, role: sm, title: Service Manager, email: "" }
-  - { id: sm_arjun, name: Arjun Mehta, role: sm, title: Service Manager, email: "" }
-  - { id: gm_neha, name: Neha Verma, role: gm, title: Growth Manager, sm: sm_priya, capacity: 60, categories: ["Funded - No trade", "Dormant trader"], email: "" }
-  - { id: gm_rohit, name: Rohit Jain, role: gm, title: Growth Manager, sm: sm_priya, capacity: 60, email: "" }
-  - { id: gm_sana, name: Sana Khan, role: gm, title: Growth Manager, sm: sm_arjun, capacity: 40, categories: ["Registered - KYC pending"], email: "" }
-  - { id: gm_vikram, name: Vikram Singh, role: gm, title: Growth Manager, sm: sm_arjun, capacity: 40, email: "" }
-  - { id: gm_pooja, name: Pooja Iyer, role: gm, title: Growth Manager, sm: sm_arjun, capacity: 40, email: "" }
+  - { id: sm_01, name: SM 01 (dummy), role: sm, title: Service Manager, email: "" }
+  - { id: sm_02, name: SM 02 (dummy), role: sm, title: Service Manager, email: "" }
+  - { id: gm_01, name: GM 01 (dummy), role: gm, title: Growth Manager, sm: sm_01, capacity: 50, email: "" }
+  - { id: gm_02, name: GM 02 (dummy), role: gm, title: Growth Manager, sm: sm_01, capacity: 50, email: "" }
+  - { id: gm_03, name: GM 03 (dummy), role: gm, title: Growth Manager, sm: sm_01, capacity: 50, email: "" }
+  - { id: gm_04, name: GM 04 (dummy), role: gm, title: Growth Manager, sm: sm_02, capacity: 50, email: "" }
+  - { id: gm_05, name: GM 05 (dummy), role: gm, title: Growth Manager, sm: sm_02, capacity: 50, email: "" }
 
 notifications:
   outbox_dir: data/outbox       # every notification is also written here and shown in the dashboard

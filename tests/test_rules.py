@@ -44,11 +44,13 @@ def load(ctx, *leads):
 
 
 def test_new_lead_is_assigned_with_first_call_sla(ctx):
+    specialist = ctx.callers()[-1]
+    specialist["categories"] = ["Funded - No trade"]
     load(ctx, {"Lead ID": "L1", "Name": "Asha Rao", "Phone": "+91 98765 43210", "Category": "Funded - No trade"})
     lead = one(ctx.conn, "SELECT * FROM leads WHERE lead_id='L1'")
     assert lead["phone"] == "9876543210"
-    assert lead["assigned_to"] == "gm_neha"  # category specialist
-    (f,) = queue_for(ctx, "gm_neha")
+    assert lead["assigned_to"] == specialist["id"]  # category specialist
+    (f,) = queue_for(ctx, specialist["id"])
     assert f["kind"] == "first_call"
     cold_sla = ctx.cfg["heat"]["first_call_sla_minutes"]["cold"]  # no app activity -> cold
     assert parse_dt(f["due_at"], TZ) == MON_11 + timedelta(minutes=cold_sla)

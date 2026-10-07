@@ -60,7 +60,7 @@ sources:
   # Runs only where the server is reachable (office network): `python run.py pull-clients`.
   client_db:
     enabled: true
-    server: ""                 # e.g. "10.0.0.25" or "BACKOFFICE-SQL\REPL" - ask IT; leave blank until known
+    server: "192.168.0.181"    # back-office SQL Server (SQL login via CLIENT_DB_USER / CLIENT_DB_PASSWORD env vars)
     database: Repl_TargetReview
     driver: ODBC Driver 18 for SQL Server
     trust_server_certificate: true

@@ -1,0 +1,3 @@
+# Office PC that pulls no-deposit clients from the back-office SQL Server
+-r requirements-scheduler.txt
+pyodbc>=5

@@ -1,0 +1,11 @@
+# Client data and local databases never go to GitHub
+data/
+*.db
+*.db-wal
+*.db-shm
+secrets/
+.streamlit/secrets.toml
+
+__pycache__/
+.pytest_cache/
+*.pyc

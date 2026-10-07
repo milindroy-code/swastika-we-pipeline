@@ -1,0 +1,30 @@
+name: Follow-up scheduler
+
+# Syncs sources, re-scores leads, assigns, fires overdue warnings/escalations,
+# and sends the morning note and EOD report (python run.py tick).
+on:
+  schedule:
+    # GitHub cron is UTC: every 15 min from 04:00 to 13:45 UTC = 09:30 to 19:15 IST, Monday to Friday.
+    - cron: "*/15 4-13 * * 1-5"
+  workflow_dispatch: {}   # "Run workflow" button for a manual run
+
+concurrency:
+  group: scheduler
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scheduler.txt
+      - run: pip install -r requirements-scheduler.txt
+      - run: python run.py tick
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}

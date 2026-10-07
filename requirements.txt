@@ -1,0 +1,11 @@
+pandas>=2.2
+pyyaml>=6
+streamlit>=1.50       # width="stretch" and st.errors.StreamlitSecretNotFoundError
+altair>=5
+openpyxl>=3.1
+requests>=2.31
+tzdata>=2024.1
+psycopg[binary]>=3.2  # Postgres when DATABASE_URL is set (hosted)
+anthropic>=1.0      # optional: AI-written pitches
+gspread>=6          # optional: private Google Sheet via service account
+pytest>=8           # tests

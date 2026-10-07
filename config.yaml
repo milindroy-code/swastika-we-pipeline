@@ -1,0 +1,193 @@
+# Growth follow-up system configuration.
+# Edit this file, then restart the scheduler (`python run.py loop`) and the dashboard.
+
+timezone: Asia/Kolkata
+database: data/growth.db
+
+working_hours:
+  start: "09:30"
+  end: "18:30"
+  days: [Mon, Tue, Wed, Thu, Fri]
+
+# Sent to every caller in the morning note, in this order.
+day_structure:
+  - { time: "09:30", block: "Huddle: review your queue, carry-over misses and today's market notes" }
+  - { time: "10:00", block: "Fresh leads: first call to every newly assigned lead" }
+  - { time: "12:00", block: "NPC retries and promised callbacks that are due" }
+  - { time: "13:30", block: "Lunch" }
+  - { time: "14:15", block: "Activity-triggered follow-ups (deposit / trade intent in the app)" }
+  - { time: "16:30", block: "Second NPC round and remaining callbacks" }
+  - { time: "18:00", block: "Update every disposition; clear overdue items before the EOD report" }
+
+rules:
+  # These are defaults. Once the admin saves the "Admin: rules" page, those values take over.
+  npc_retry_hours: 4            # not picked up -> resurface the lead this many hours later (GMs cannot change it)
+  max_npc_attempts: 6           # after this many consecutive NPCs the lead is marked unreachable
+  first_call_sla_minutes: 120   # a newly assigned lead must get its first call within this window
+  warning_after_minutes: 15     # overdue by this much -> warning to the caller
+  escalate_after_minutes: 60    # overdue by this much -> escalated to the manager, counted as a miss
+  stale_after_days: 3           # open lead with no contact for this long -> system follow-up
+  sync_interval_minutes: 5      # how often `run.py loop` syncs sources and checks follow-ups
+
+sources:
+  leads:
+    # csv            -> a local .csv/.xlsx file (path)
+    # gsheet_csv_url -> a Google Sheet "File > Share > Publish to web" CSV link (url)
+    # gsheet         -> a private Google Sheet read with a service account (spreadsheet_key, worksheet, service_account_json)
+    type: csv
+    path: data/leads.csv
+    url: ""
+    spreadsheet_key: ""
+    worksheet: ""
+    service_account_json: secrets/service_account.json
+    # Map your sheet's column headers to the fields the system uses. Only lead_id OR phone is required.
+    columns:
+      lead_id: "Lead ID"
+      we_user_id: "WebEngage User ID"   # used to join app activity; falls back to lead_id, then phone/email
+      name: "Name"
+      phone: "Phone"
+      email: "Email"
+      category: "Category"
+      source: "Source"
+      remarks: "Remarks"
+      # Optional: carry over follow-ups already recorded in the sheet when a lead is first imported.
+      last_call_status: "Last Call Status"
+      last_call_at: "Last Call Time"
+      next_followup_at: "Next Follow-up"
+    npc_statuses: ["NPC", "Not Picked", "Not Picked Up", "No Answer", "Busy", "Switched Off"]
+
+  # New clients with no first deposit, from the back-office SQL Server (read-only).
+  # Runs only where the server is reachable (office network): `python run.py pull-clients`.
+  client_db:
+    enabled: true
+    server: ""                 # e.g. "10.0.0.25" or "BACKOFFICE-SQL\REPL" - ask IT; leave blank until known
+    database: Repl_TargetReview
+    driver: ODBC Driver 18 for SQL Server
+    trust_server_certificate: true
+    # Windows login is used by default. For a SQL login set CLIENT_DB_USER and CLIENT_DB_PASSWORD,
+    # or put a full ODBC connection string in CLIENT_DB_CONN.
+    new_clients_query: |
+      SELECT
+          C.CLIENT_ID,
+          C.REGISTRATION_DATE,
+          DATEDIFF(DAY, C.REGISTRATION_DATE, GETDATE()) AS DaysSinceRegistration
+      FROM [Repl_TargetReview].[dbo].[tbl_ClientNew] C
+      LEFT JOIN [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F
+          ON C.CLIENT_ID = F.CLIENT_ID
+      WHERE
+          C.REGISTRATION_DATE >= DATEADD(DAY, -30, CAST(GETDATE() AS DATE))
+          AND (
+              F.FirstDepositDate IS NULL
+              OR F.FirstDeposit IS NULL
+              OR F.FirstDeposit <= 0
+          )
+      ORDER BY
+          DaysSinceRegistration ASC;
+    # Clients who have deposited recently: their open leads are closed as converted.
+    deposits_query: |
+      SELECT F.CLIENT_ID, F.FirstDepositDate
+      FROM [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F
+      WHERE F.FirstDeposit > 0
+        AND F.FirstDepositDate >= DATEADD(DAY, -45, CAST(GETDATE() AS DATE));
+
+  webengage:
+    folder: data/webengage    # drop WebEngage CSV/XLSX exports here; each file is loaded once
+    # Leave blank to auto-detect common WebEngage header names.
+    user_id_column: ""
+    event_name_column: ""
+    event_time_column: ""
+    # Leads created from an activity file get the category whose key appears in the file name.
+    file_categories:
+      not_added_fund: "Authenticated - no funds added"
+
+# Map your WebEngage event names to the signals the system understands.
+signals:
+  app_open: ["DASHBOARD_OPENED_MOB", "App Opened", "Session Started", "app_open", "App Launched"]
+  kyc_started: ["KYC Started", "kyc_started"]
+  kyc_complete: ["KYC Completed", "kyc_completed", "Account Activated"]
+  deposit_initiated: ["Add Funds Clicked", "Deposit Initiated", "deposit_initiated"]
+  deposit_failed: ["Deposit Failed", "Payment Failed", "deposit_failed"]
+  deposit_success: ["Deposit Successful", "Funds Added", "deposit_success"]
+  instrument_viewed: ["Stock Viewed", "Scrip Viewed", "Instrument Viewed", "stock_viewed"]
+  watchlist_add: ["Added To Watchlist", "watchlist_add"]
+  order_abandoned: ["Order Window Closed", "Order Abandoned", "order_abandoned"]
+  trade_placed: ["ORDER_PLACED_MOB", "Order Placed", "Trade Executed", "order_placed"]
+  research_call_accepted: ["CALL_ACCEPTED_MOB"]
+  research_viewed: ["RECOMMENDATION_LISTING_OPENED_MOB", "RECOMMENDATION_LANDING_SCREEN_MOB"]
+
+# Signals that create a system follow-up for an open lead (when nothing is already pending).
+triggers:
+  deposit_failed: "Deposit failed in the app: help them complete it"
+  deposit_initiated: "Started adding funds but did not finish"
+  order_abandoned: "Opened an order window but did not place it"
+  kyc_complete: "KYC just completed: push for the first deposit"
+  deposit_success: "Funds added: guide them to their first trade"
+
+# Heat score (0-100) from app activity: decides who gets called first.
+# Per activity:  weight (core / non-core)  x  recency (halves every `recency_half_life_days`)
+#                x  frequency (1 + log2(times done), capped at `frequency_cap`)
+# The sum is mapped onto 0-100 with  100 x (1 - e^(-sum / score_scale)).
+heat:
+  core_weight: 10
+  non_core_weight: 3
+  recency_half_life_days: 3
+  frequency_cap: 4
+  score_scale: 35                      # tuned on the 4-7 Oct file: ~17% hot, ~14% warm
+  lookback_days: 30
+  tiers: { hot: 70, warm: 40 }          # score >= 70 is hot, >= 40 warm, otherwise cold
+  first_call_sla_minutes: { hot: 30, warm: 120, cold: 240 }
+  # Activities that count as core when the file has no "Activity Type" column (event names or signal names).
+  # Everything else (e.g. DASHBOARD_OPENED_MOB, RECOMMENDATION_LANDING_SCREEN_MOB) is non-core.
+  # REGISTERED is the registration date from the client database: a fresh sign-up adds core points.
+  core_activities: [REGISTERED, ORDER_PLACED_MOB, CALL_ACCEPTED_MOB, RECOMMENDATION_LISTING_OPENED_MOB,
+                    kyc_started, kyc_complete, deposit_initiated, deposit_failed, deposit_success,
+                    order_abandoned, trade_placed, watchlist_add]
+  # Users in an activity file who are not in the lead sheet become leads, keyed by their ClientCode.
+  create_leads_from_activity: true
+  require_phone_for_new_leads: false
+  new_lead_category: "New user - app activity"
+
+# Map your sheet's categories to a lifecycle stage so the right playbook is used.
+# Stages: kyc_pending, kyc_no_deposit, funded_no_trade, dormant_trader, active_trader.
+# Unmapped categories fall back to a stage inferred from app activity.
+category_stage:
+  "Registered - KYC pending": kyc_pending
+  "KYC done - No deposit": kyc_no_deposit
+  "Funded - No trade": funded_no_trade
+  "Dormant trader": dormant_trader
+  "Authenticated - no funds added": kyc_no_deposit
+  "New - no deposit (0-7 days)": kyc_no_deposit
+  "New - no deposit (8-15 days)": kyc_no_deposit
+  "New - no deposit (16-30 days)": kyc_no_deposit
+
+team:
+  # PLACEHOLDER NAMES: replace with the real team.
+  # role: gm  = Growth Manager, does the calling and gets leads (capacity = max open leads)
+  #       sm  = Service Manager, mentors their GMs, receives escalations and team reports
+  # sm:   the id of the GM's Service Manager
+  # categories: optional; GMs listed against a lead category get those leads first.
+  - { id: sm_priya, name: Priya Sharma, role: sm, title: Service Manager, email: "" }
+  - { id: sm_arjun, name: Arjun Mehta, role: sm, title: Service Manager, email: "" }
+  - { id: gm_neha, name: Neha Verma, role: gm, title: Growth Manager, sm: sm_priya, capacity: 60, categories: ["Funded - No trade", "Dormant trader"], email: "" }
+  - { id: gm_rohit, name: Rohit Jain, role: gm, title: Growth Manager, sm: sm_priya, capacity: 60, email: "" }
+  - { id: gm_sana, name: Sana Khan, role: gm, title: Growth Manager, sm: sm_arjun, capacity: 40, categories: ["Registered - KYC pending"], email: "" }
+  - { id: gm_vikram, name: Vikram Singh, role: gm, title: Growth Manager, sm: sm_arjun, capacity: 40, email: "" }
+  - { id: gm_pooja, name: Pooja Iyer, role: gm, title: Growth Manager, sm: sm_arjun, capacity: 40, email: "" }
+
+notifications:
+  outbox_dir: data/outbox       # every notification is also written here and shown in the dashboard
+  email:
+    enabled: false
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    username: ""
+    password_env: SMTP_PASSWORD # read the password from this environment variable
+    from_address: ""
+  webhook_url: ""               # optional Slack / Google Chat incoming webhook for alerts
+
+market_notes_file: data/market_notes.md
+
+ai_pitch:
+  enabled: true                 # used only when Anthropic credentials are available; otherwise rule-based pitches
+  model: claude-opus-5-5
+reports_dir: data/reports           # EOD reports are also saved here as Markdown

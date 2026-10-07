@@ -4,8 +4,9 @@ name: Follow-up scheduler
 # and sends the morning note and EOD report (python run.py tick).
 on:
   schedule:
-    # GitHub cron is UTC: every 15 min from 04:00 to 13:45 UTC = 09:30 to 19:15 IST, Monday to Friday.
-    - cron: "*/15 4-13 * * 1-5"
+    # GitHub cron is UTC. Every 15 min from 04:30 to 13:45 UTC = 10:00 to 19:15 IST, Monday to Friday.
+    - cron: "30,45 4 * * 1-5"
+    - cron: "*/15 5-13 * * 1-5"
   workflow_dispatch: {}   # "Run workflow" button for a manual run
 
 concurrency:

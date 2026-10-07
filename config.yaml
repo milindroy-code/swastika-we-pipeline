@@ -5,19 +5,23 @@ timezone: Asia/Kolkata
 database: data/growth.db
 
 working_hours:
-  start: "09:30"
+  start: "10:00"
   end: "18:30"
   days: [Mon, Tue, Wed, Thu, Fri]
 
-# Sent to every caller in the morning note, in this order.
+# The GM's hourly routine. It is listed in the morning note, and at the start of each block every GM
+# gets a short nudge with their live queue counts (nudge: false skips it, e.g. for lunch).
+# Built around the 4-hour NPC rule: numbers dialled 10:00-13:00 come back 14:00-17:00 the same day.
 day_structure:
-  - { time: "09:30", block: "Huddle: review your queue, carry-over misses and today's market notes" }
-  - { time: "10:00", block: "Fresh leads: first call to every newly assigned lead" }
-  - { time: "12:00", block: "NPC retries and promised callbacks that are due" }
-  - { time: "13:30", block: "Lunch" }
-  - { time: "14:15", block: "Activity-triggered follow-ups (deposit / trade intent in the app)" }
-  - { time: "16:30", block: "Second NPC round and remaining callbacks" }
-  - { time: "18:00", block: "Update every disposition; clear overdue items before the EOD report" }
+  - { time: "10:00", block: "Huddle with your SM (15 min): morning note, yesterday's misses, market notes. Then clear every overdue / carry-over follow-up" }
+  - { time: "11:00", block: "🔥 Hot and 🌤️ warm leads first: research-active and order-attempt clients while the market is open" }
+  - { time: "12:00", block: "Fresh sign-ups (registered 0-7 days, no deposit): first calls and welcome / onboarding" }
+  - { time: "13:00", block: "Lunch", nudge: false }
+  - { time: "14:00", block: "NPC round 1: morning not-picked-up numbers come back now (4 h rule), plus promised callbacks due" }
+  - { time: "15:00", block: "App-activity and turned-hot follow-ups (deposit failed, order abandoned, research calls) before market close at 15:30" }
+  - { time: "16:00", block: "Going cold: 8-30 day no-deposit clients and dormant traders back in the app (re-activation)" }
+  - { time: "17:00", block: "NPC round 2 and evening callbacks: clients whose best time to call is the evening" }
+  - { time: "18:00", block: "Wrap-up: log every disposition, set promised times, clear overdue before the 18:30 EOD report" }
 
 rules:
   # These are defaults. Once the admin saves the "Admin: rules" page, those values take over.
@@ -96,7 +100,10 @@ sources:
     user_id_column: ""
     event_name_column: ""
     event_time_column: ""
-    # Leads created from an activity file get the category whose key appears in the file name.
+    # Rows that are WebEngage totals or placeholders, not real clients.
+    ignore_client_ids: ["Others", "(not set)", "null", "NA", "Total"]
+    # Leads created from an activity file get the category whose key appears in the file name
+    # (replaced by the client-database ageing category once `run.py pull-clients` has looked them up).
     file_categories:
       not_added_fund: "Authenticated - no funds added"
 
@@ -128,6 +135,7 @@ triggers:
 #                x  frequency (1 + log2(times done), capped at `frequency_cap`)
 # The sum is mapped onto 0-100 with  100 x (1 - e^(-sum / score_scale)).
 heat:
+  high_holdings: 100000                 # holdings at or above this (₹) are flagged as a "High-value" lever
   core_weight: 10
   non_core_weight: 3
   recency_half_life_days: 3
@@ -159,6 +167,11 @@ category_stage:
   "New - no deposit (0-7 days)": kyc_no_deposit
   "New - no deposit (8-15 days)": kyc_no_deposit
   "New - no deposit (16-30 days)": kyc_no_deposit
+  "No deposit (31-90 days)": kyc_no_deposit
+  "No deposit (90+ days)": kyc_no_deposit
+  "Deposited - no trade yet": funded_no_trade
+  "Traded - dormant (30+ days)": dormant_trader
+  "Traded - active (last 30 days)": active_trader
 
 team:
   # DUMMY TEAM for now: replace with the real people before go-live.

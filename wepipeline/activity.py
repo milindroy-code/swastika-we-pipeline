@@ -87,6 +87,9 @@ def summarize(ctx: Ctx, lead: dict, days: int = 30) -> dict:
 
 
 def stage_for(ctx: Ctx, lead: dict, summary: dict) -> str:
+    known = json.loads(lead.get("extra") or "{}").get("stage")  # from the client database (deposit / trade dates)
+    if known in STAGES:
+        return known
     mapped = ctx.cfg.get("category_stage", {}).get(lead.get("category") or "")
     if mapped in STAGES:
         return mapped

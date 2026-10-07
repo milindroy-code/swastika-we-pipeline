@@ -153,6 +153,35 @@ def morning_note(ctx: Ctx, member: dict, day: date) -> tuple[str, str]:
     return subject, body
 
 
+def current_block(ctx: Ctx, now: datetime) -> tuple[dict, datetime, datetime] | None:
+    """The routine block running at `now`, with its start and end (the next block's start, or end of day)."""
+    blocks = sorted(ctx.cfg.get("day_structure", []), key=lambda b: b["time"])
+    starts = [datetime.combine(now.date(), time.fromisoformat(b["time"]), ctx.tz) for b in blocks]
+    for i, (b, start) in enumerate(zip(blocks, starts)):
+        end = starts[i + 1] if i + 1 < len(starts) else ctx.day_end(now.date())
+        if start <= now < end:
+            return b, start, end
+    return None
+
+
+def routine_nudge(ctx: Ctx, member: dict, block: dict, start: datetime, end: datetime) -> tuple[str, str]:
+    """Short hourly message to a GM: what this hour is for, and what their queue holds right now."""
+    from .followups import queue_for
+
+    now = ctx.now()
+    grace = timedelta(minutes=ctx.rules.get("warning_after_minutes", 15))
+    queue = queue_for(ctx, member["id"])
+    overdue = [q for q in queue if parse_dt(q["due_at"], ctx.tz) + grace < now]
+    this_hour = [q for q in queue if q not in overdue and parse_dt(q["due_at"], ctx.tz) < end]
+    hot = sum(1 for q in overdue + this_hour if q["heat_tier"] == "hot")
+    first = member["name"].split(" ")[0]
+    subject = f"{start:%H:%M}: {block['block'].split(':')[0][:60]}"
+    body = (f"{first}, {start:%H:%M}–{end:%H:%M}: {block['block']}\n\n"
+            f"Your queue right now: **{len(overdue)} overdue** · **{len(this_hour)} due before {end:%H:%M}**"
+            + (f" · 🔥 {hot} hot" if hot else "") + ". Hot leads are at the top of My day.")
+    return subject, body
+
+
 def eod_report(ctx: Ctx, day: date, member: dict) -> tuple[str, str]:
     if ctx.is_sm(member):
         team = compliance(ctx, day, team_of=member["id"])

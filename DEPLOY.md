@@ -4,7 +4,7 @@
 |---|---|---|
 | Dashboard (GMs log calls, SMs track compliance) | Streamlit Community Cloud | Free |
 | Database (leads, calls, follow-ups, alerts) | Neon Postgres | Free: 0.5 GB, about 100× what this needs |
-| Scheduler: sync, heat score, assignment, warnings and escalations, morning and EOD notes | GitHub Actions, every 15 min, 09:30–19:15 IST, Mon–Fri | Free: about 900 of the 2,000 free minutes a month |
+| Scheduler: sync, heat score, assignment, warnings and escalations, morning and EOD notes | GitHub Actions, every 15 min, 10:00–19:15 IST, Mon–Fri | Free: about 900 of the 2,000 free minutes a month |
 | Pull of new no-deposit clients from the back-office SQL Server | An always-on office PC (Task Scheduler, hourly) | Free |
 | Live Google Sheet: every customer with score, levers and pitch | Google Sheets, written by the scheduler hourly | Free |
 

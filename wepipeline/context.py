@@ -123,7 +123,7 @@ def iso(dt: datetime | None) -> str | None:
 
 def parse_dt(value, tz: ZoneInfo) -> datetime | None:
     """Parse sheet / export timestamps into tz-aware datetimes; None if blank or unparseable."""
-    if value is None:
+    if value is None or str(value) in {"NaT", "nan"}:  # pandas fills empty date cells with NaT
         return None
     if isinstance(value, datetime):
         dt = value

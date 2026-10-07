@@ -58,7 +58,11 @@ def bucket(days: int) -> str:
 
 
 def _bucket_spec() -> list[tuple[int, str]]:
-    return [(7, "New - no deposit (0-7 days)"), (15, "New - no deposit (8-15 days)"), (30, "New - no deposit (16-30 days)")]
+    return [(7, "New - no deposit (0-7 days)"), (15, "New - no deposit (8-15 days)"), (30, "New - no deposit (16-30 days)"),
+            (90, "No deposit (31-90 days)"), (10**6, "No deposit (90+ days)")]
+
+
+NO_DEPOSIT_CATEGORIES = {label for _, label in _bucket_spec()}
 
 
 def sync_new_clients(ctx: Ctx, clients: pd.DataFrame | None = None, deposits: pd.DataFrame | None = None) -> dict:
@@ -106,13 +110,14 @@ def sync_new_clients(ctx: Ctx, clients: pd.DataFrame | None = None, deposits: pd
         )
     ctx.conn.commit()
     closed = close_deposited(ctx, deposits) if deposits is not None else 0
-    buckets = {label: sum(1 for d in seen.values() if bucket(max((now.date() - d.date()).days, 0)) == label)
-               for _, label in _bucket_spec()}
+    ages = [bucket(max((now.date() - d.date()).days, 0)) for d in seen.values()]
+    buckets = {label: ages.count(label) for _, label in _bucket_spec() if label in ages}
     return {"clients": len(seen), "new_leads": new, "refreshed": refreshed, "deposited_closed": closed, "buckets": buckets}
 
 
 def close_deposited(ctx: Ctx, deposits: pd.DataFrame) -> int:
-    """Leads that have made their first deposit are converted: no more calls for a first deposit."""
+    """No-deposit leads that have now made their first deposit are converted: no more calls for a first deposit.
+    Leads in other categories (existing clients being re-activated) are not touched."""
     if deposits.empty:
         return 0
     cols = {k.lower(): k for k in deposits.columns}
@@ -123,9 +128,9 @@ def close_deposited(ctx: Ctx, deposits: pd.DataFrame) -> int:
     deposited = {str(r[id_col]).strip(): r.get(date_col) if date_col else None for r in deposits.to_dict("records")}
     now = iso(ctx.now())
     closed = 0
-    for lead in rows(ctx.conn, "SELECT lead_id, we_user_id, assigned_to FROM leads WHERE status='open'"):
+    for lead in rows(ctx.conn, "SELECT lead_id, we_user_id, assigned_to, category FROM leads WHERE status='open'"):
         cid = lead["we_user_id"] or lead["lead_id"]
-        if cid not in deposited:
+        if cid not in deposited or lead["category"] not in NO_DEPOSIT_CATEGORIES:
             continue
         ctx.conn.execute("UPDATE leads SET status='converted', last_outcome='deposited', updated_at=? WHERE lead_id=?",
                          (now, lead["lead_id"]))
@@ -134,3 +139,124 @@ def close_deposited(ctx: Ctx, deposits: pd.DataFrame) -> int:
         closed += 1
     ctx.conn.commit()
     return closed
+
+
+# ---------------------------------------------------------------- ageing for every known client
+LOOKUP_SQL = """
+SELECT C.CLIENT_ID, C.REGISTRATION_DATE, C.AccountStatus, C.IsAccountClosed,
+       F.FirstDeposit, F.FirstDepositDate, F.FTD, F.LTD, F.Holdings
+FROM [Repl_TargetReview].[dbo].[tbl_ClientNew] C
+LEFT JOIN [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F ON C.CLIENT_ID = F.CLIENT_ID
+WHERE C.CLIENT_ID IN ({ids})
+"""
+
+
+def lookup_clients(ctx: Ctx, client_ids: list[str]) -> pd.DataFrame:
+    """Registration, deposit and trade dates for specific clients (read-only, in chunks under SQL Server's 2,100-parameter limit)."""
+    import pyodbc
+
+    sql = _cfg(ctx).get("lookup_query") or LOOKUP_SQL
+    frames = []
+    with pyodbc.connect(connection_string(ctx), timeout=20, readonly=True) as conn:
+        cur = conn.cursor()
+        for i in range(0, len(client_ids), 1000):
+            chunk = client_ids[i:i + 1000]
+            cur.execute(sql.format(ids=",".join("?" * len(chunk))), chunk)
+            cols = [c[0] for c in cur.description]
+            frames.append(pd.DataFrame.from_records(cur.fetchall(), columns=cols))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _num(v) -> float:
+    try:
+        return float(v) if v is not None and str(v).strip() not in {"", "nan", "None", "NaT"} else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def classify(ctx: Ctx, rec: dict) -> dict:
+    """Ageing category, pitch stage and facts for one client row from the lookup query."""
+    now = ctx.now()
+    reg = parse_dt(rec.get("REGISTRATION_DATE"), ctx.tz)
+    ftd, ltd = parse_dt(rec.get("FTD"), ctx.tz), parse_dt(rec.get("LTD"), ctx.tz)
+    fdd = parse_dt(rec.get("FirstDepositDate"), ctx.tz)
+    deposited = _num(rec.get("FirstDeposit")) > 0 or fdd is not None
+    reg_days = max((now.date() - reg.date()).days, 0) if reg else None
+    ltd_days = (now.date() - ltd.date()).days if ltd else None
+    if ftd or ltd:
+        if ltd_days is not None and ltd_days <= 30:
+            category, stage = "Traded - active (last 30 days)", "active_trader"
+        else:
+            category, stage = "Traded - dormant (30+ days)", "dormant_trader"
+    elif deposited:
+        category, stage = "Deposited - no trade yet", "funded_no_trade"
+    else:
+        category, stage = bucket(reg_days if reg_days is not None else 10**6), "kyc_no_deposit"
+    return {
+        "category": category,
+        "stage": stage,
+        "closed": str(rec.get("IsAccountClosed") or "").strip().lower() in {"1", "true", "y", "yes"},
+        "registration": reg,
+        "extra": {
+            "registration_date": iso(reg), "days_since_registration": reg_days, "stage": stage,
+            "deposit_status": "deposited" if deposited else "no deposit",
+            "first_deposit": _num(rec.get("FirstDeposit")) or None, "first_deposit_date": iso(fdd),
+            "first_trade_date": iso(ftd), "last_trade_date": iso(ltd), "days_since_last_trade": ltd_days,
+            "holdings": _num(rec.get("Holdings")) or None, "account_status": rec.get("AccountStatus") or "",
+        },
+    }
+
+
+LOOKUP_FIELDS = ["CLIENT_ID", "REGISTRATION_DATE", "AccountStatus", "IsAccountClosed", "FirstDeposit",
+                 "FirstDepositDate", "FTD", "LTD", "Holdings"]
+
+
+def enrich_leads(ctx: Ctx, lookup: pd.DataFrame | None = None) -> dict:
+    """Give every open lead its ageing category from the client database, whatever source it came from."""
+    leads = rows(ctx.conn, "SELECT lead_id, we_user_id, category, source, extra FROM leads WHERE status='open'")
+    if not leads:
+        return {"looked_up": 0}
+    ids = sorted({(l["we_user_id"] or l["lead_id"]).strip() for l in leads})
+    if lookup is None:
+        lookup = lookup_clients(ctx, ids)
+    found = {}
+    if not lookup.empty:
+        cols = {k.lower(): k for k in lookup.columns}
+        for r in lookup.to_dict("records"):
+            rec = {name: r.get(cols.get(name.lower())) for name in LOOKUP_FIELDS}
+            found.setdefault(str(rec["CLIENT_ID"]).strip(), rec)
+    now = iso(ctx.now())
+    counts, closed = {}, 0
+    for lead in leads:
+        cid = (lead["we_user_id"] or lead["lead_id"]).strip()
+        extra = json.loads(lead["extra"] or "{}")
+        if cid not in found:
+            category = "Not found in client DB"
+        else:
+            info = classify(ctx, found[cid])
+            if info["closed"]:
+                ctx.conn.execute("UPDATE leads SET status='invalid', last_outcome='account_closed', updated_at=? WHERE lead_id=?",
+                                 (now, lead["lead_id"]))
+                ctx.conn.execute("UPDATE followups SET status='cancelled', completed_at=? WHERE lead_id=? AND status='pending'",
+                                 (now, lead["lead_id"]))
+                closed += 1
+                continue
+            category = info["category"]
+            extra.update(info["extra"])
+            if info["registration"]:
+                ctx.conn.execute(
+                    """INSERT INTO activity_summary (user_id, activity, count, last_at, activity_type, source_file) VALUES (?,?,?,?,?,?)
+                       ON CONFLICT (user_id, activity) DO UPDATE SET last_at=excluded.last_at, source_file=excluded.source_file""",
+                    (cid, REGISTERED, 1, iso(info["registration"]), "", "client_db"),
+                )
+        automated = lead["source"] == SOURCE or (lead["source"] or "").startswith("WebEngage activity")
+        ctx.conn.execute("UPDATE leads SET category=?, extra=?, updated_at=? WHERE lead_id=?",
+                         (category if automated else lead["category"], json.dumps(extra), now, lead["lead_id"]))
+        counts[category] = counts.get(category, 0) + 1
+    ctx.conn.commit()
+    return {"looked_up": len(ids), "found": len(found), "closed_accounts": closed, "categories": dict(sorted(counts.items()))}
+
+
+def refresh_from_client_db(ctx: Ctx) -> dict:
+    """Pull new no-deposit clients, then age every lead from the client database."""
+    return {"new_clients": sync_new_clients(ctx), "ageing": enrich_leads(ctx)}

@@ -71,7 +71,7 @@ def test_late_npc_rolls_to_next_working_morning(ctx):
     ctx._now = datetime(2026, 10, 9, 17, 0, tzinfo=TZ)  # Friday 5pm + 4h is after hours
     log_call(ctx, "L1", agent, "busy")
     (f,) = queue_for(ctx, agent)
-    assert parse_dt(f["due_at"], TZ) == datetime(2026, 10, 12, 9, 30, tzinfo=TZ)  # Monday start
+    assert parse_dt(f["due_at"], TZ) == ctx.day_start(datetime(2026, 10, 12).date())  # Monday, start of day
 
 
 def test_max_npc_marks_unreachable_and_tells_manager(ctx):
@@ -195,3 +195,38 @@ def test_admin_rules_override_config(ctx):
         save_rules(ctx, {**rules, "escalate_after_minutes": 5}, current_sla(ctx))  # escalation before warning
     with pytest.raises(ValueError):
         save_rules(ctx, {**rules, "npc_retry_hours": 100}, current_sla(ctx))
+
+
+def test_hourly_routine_nudges_each_gm_once_per_block(ctx):
+    from wepipeline.jobs import send_routine_nudges
+    from wepipeline.reports import current_block
+
+    load(ctx, {"Lead ID": "L1", "Phone": "9000000001"})
+    ctx._now = datetime(2026, 10, 5, 10, 5, tzinfo=TZ)
+    assert current_block(ctx, ctx.now())[0]["time"] == "10:00"
+    assert send_routine_nudges(ctx) == 0  # first block: the morning note covers it
+    ctx._now = datetime(2026, 10, 5, 11, 2, tzinfo=TZ)
+    assert send_routine_nudges(ctx) == len(ctx.callers())
+    assert send_routine_nudges(ctx) == 0  # once per block
+    ctx._now = datetime(2026, 10, 5, 13, 10, tzinfo=TZ)
+    assert send_routine_nudges(ctx) == 0  # lunch: no nudge
+    ctx._now = datetime(2026, 10, 5, 15, 40, tzinfo=TZ)  # scheduler was down 14:00-15:40: only the 15:00 block is sent
+    assert send_routine_nudges(ctx) == len(ctx.callers())
+    subjects = [r["subject"] for r in rows(ctx.conn, "SELECT subject FROM notifications WHERE kind='routine' ORDER BY id")]
+    assert {s[:5] for s in subjects} == {"11:00", "15:00"}
+    body = one(ctx.conn, "SELECT body FROM notifications WHERE kind='routine' ORDER BY id LIMIT 1")["body"]
+    assert "overdue" in body and "due before 12:00" in body
+    ctx._now = datetime(2026, 10, 5, 19, 0, tzinfo=TZ)
+    assert current_block(ctx, ctx.now()) is None
+
+
+def test_followups_move_when_working_hours_change(ctx):
+    from wepipeline.followups import add_followup, reroll_outside_hours
+
+    load(ctx, {"Lead ID": "L1", "Phone": "9000000001"})
+    agent = one(ctx.conn, "SELECT assigned_to FROM leads")["assigned_to"]
+    add_followup(ctx, "L1", agent, datetime(2026, 10, 6, 9, 30, tzinfo=TZ), "promised", "set under the old 09:30 start")
+    assert reroll_outside_hours(ctx) == 1
+    dues = [parse_dt(r["due_at"], TZ) for r in rows(ctx.conn, "SELECT due_at FROM followups WHERE kind='promised'")]
+    assert dues == [ctx.day_start(datetime(2026, 10, 6).date())]
+    assert reroll_outside_hours(ctx) == 0

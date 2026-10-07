@@ -20,7 +20,7 @@ from wepipeline.admin import RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, curre
 from wepipeline.db import set_setting
 from wepipeline.sheet_export import COLUMNS, build_rows, export
 from wepipeline.pitch import ai_pitch, format_pitch, market_notes_text, rule_pitch
-from wepipeline.reports import classify, compliance, eod_report, misses
+from wepipeline.reports import classify, compliance, current_block, eod_report, misses
 
 st.set_page_config(page_title="Growth Follow-ups", page_icon="📞", layout="wide")
 
@@ -185,6 +185,12 @@ def caller_day(agent_id: str) -> None:
     for a in rows(ctx.conn, "SELECT * FROM alerts WHERE agent_id=? AND manager_id IS NULL AND acknowledged_at IS NULL "
                             "AND level='warning' ORDER BY created_at DESC LIMIT 5", (agent_id,)):
         st.warning(f"⚠️ {a['message']}")
+    block = current_block(ctx, ctx.now())
+    if block:
+        b, start, end = block
+        st.info(f"**Now ({start:%H:%M}–{end:%H:%M}):** {b['block']}")
+    with st.expander("🗓️ Today's hourly routine"):
+        st.markdown("\n".join(f"- **{x['time']}**: {x['block']}" for x in ctx.cfg.get("day_structure", [])))
     with st.expander("⏱️ Your follow-up time limits (set by admin)"):
         st.markdown(time_limits_md())
     note = one(ctx.conn, "SELECT * FROM notifications WHERE recipient=? AND kind='morning_note' ORDER BY created_at DESC LIMIT 1", (agent_id,))
@@ -391,7 +397,7 @@ def customer_list_page() -> None:
                "when one is configured. It refreshes every 5 minutes here.")
     data = _customer_rows(id(ctx))
     df = pd.DataFrame([{h: r.get(k, "") for h, k in COLUMNS} for r in data])
-    for col in ("Rank", "Days since registration"):  # blank for closed leads / clients without a registration date
+    for col in ("Rank", "Days since registration", "Days since last trade", "Holdings (₹)"):  # blank for closed leads / clients without a registration date
         df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
     c1, c2, c3, c4 = st.columns(4)
     pr = c1.multiselect("Priority", ["🔥 Hot", "🌤️ Warm", "❄️ Cold"])

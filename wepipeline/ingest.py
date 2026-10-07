@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from .context import Ctx, iso, parse_dt
-from .db import one
+from .db import one, rows
 
 LEAD_FIELDS = ["lead_id", "we_user_id", "name", "phone", "email", "category", "source", "remarks"]
 HINT_FIELDS = ["last_call_status", "last_call_at", "next_followup_at"]
@@ -272,6 +272,7 @@ def _ingest_frame(ctx: Ctx, df: pd.DataFrame, sheet: str, path: Path) -> tuple[s
     name_col = _find(df, "", NAME_COLS)
     category_col = _find(df, "", CATEGORY_COLS)
     buckets = {c: t for c in df.columns if (t := _bucket_time(ctx, c))}
+    ignored = {i.lower() for i in cfg.get("ignore_client_ids", [])}
     now = ctx.now()
     count = 0
     users: dict[str, dict] = {}
@@ -290,7 +291,7 @@ def _ingest_frame(ctx: Ctx, df: pd.DataFrame, sheet: str, path: Path) -> tuple[s
         kind = "activity"  # WebEngage pivot: one row per user, one column per hour/day with the count
         for r in df.to_dict("records"):
             uid, event = str(r[user_col]).strip(), str(r[activity_col]).strip()
-            if not uid or not event:
+            if not uid or not event or uid.lower() in ignored:
                 continue
             activity = qualified(event)
             hits = {t: n for c, t in buckets.items() if (n := _as_int(r[c])) > 0}
@@ -378,6 +379,23 @@ def ingest_webengage_file(ctx: Ctx, path: Path) -> dict:
     )
     ctx.conn.commit()
     return {"file": path.name, "kind": kind, "rows": total, "users": len(users), "new_leads": new_leads}
+
+
+def purge_ignored(ctx: Ctx) -> int:
+    """Remove leads whose id is a WebEngage placeholder (e.g. the "Others" total row) and were never called."""
+    ignored = [i for i in ctx.cfg["sources"]["webengage"].get("ignore_client_ids", [])]
+    removed = 0
+    for i in ignored:
+        for lead in rows(ctx.conn, "SELECT lead_id FROM leads WHERE LOWER(lead_id)=LOWER(?) "
+                                   "AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.lead_id=leads.lead_id)", (i,)):
+            for table in ("followups", "alerts", "pitches"):
+                ctx.conn.execute(f"DELETE FROM {table} WHERE lead_id=?", (lead["lead_id"],))
+            ctx.conn.execute("DELETE FROM leads WHERE lead_id=?", (lead["lead_id"],))
+            removed += 1
+        for table, col in (("events", "user_id"), ("activity_summary", "user_id")):
+            ctx.conn.execute(f"DELETE FROM {table} WHERE LOWER({col})=LOWER(?)", (i,))
+    ctx.conn.commit()
+    return removed
 
 
 def sync_webengage(ctx: Ctx) -> list[dict]:

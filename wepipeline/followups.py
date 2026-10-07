@@ -98,6 +98,20 @@ def log_call(
             "next_due": iso(next_followup[0]) if next_followup else None}
 
 
+def reroll_outside_hours(ctx: Ctx) -> int:
+    """Move future follow-ups that now fall outside working hours (e.g. after the start time changed)
+    to the next working start, so they don't all turn overdue the moment the day begins."""
+    moved = 0
+    for f in rows(ctx.conn, "SELECT id, due_at FROM followups WHERE status='pending' AND due_at > ?", (iso(ctx.now()),)):
+        due = parse_dt(f["due_at"], ctx.tz)
+        rolled = ctx.roll_to_working_hours(due)
+        if rolled != due:
+            ctx.conn.execute("UPDATE followups SET due_at=? WHERE id=?", (iso(rolled), f["id"]))
+            moved += 1
+    ctx.conn.commit()
+    return moved
+
+
 def reassign_lead(ctx: Ctx, lead_id: str, agent_id: str) -> None:
     now = iso(ctx.now())
     ctx.conn.execute("UPDATE leads SET assigned_to=?, assigned_at=?, updated_at=? WHERE lead_id=?", (agent_id, now, now, lead_id))

@@ -3,7 +3,7 @@
     python run.py sync        # pull the lead sheet + WebEngage exports, assign, check follow-ups
     python run.py morning     # send today's morning notes now
     python run.py eod         # send today's end-of-day report now
-    python run.py pull-clients  # new no-deposit clients from the back-office SQL Server, then a full sync
+    python run.py pull-clients  # no-deposit clients + ageing of every lead from the back-office SQL Server, then a full sync
     python run.py export-sheet  # publish the prioritised customer list (CSV + Google Sheet if configured)
     python run.py loop        # run continuously (sync every few minutes, morning note and EOD on schedule)
 """
@@ -29,9 +29,9 @@ def main() -> None:
         jobs.loop(ctx)
         return
     if args.command == "pull-clients":
-        from wepipeline.clientdb import sync_new_clients
+        from wepipeline.clientdb import refresh_from_client_db
 
-        print(json.dumps({"client_db": sync_new_clients(ctx), "sync": jobs.sync(ctx)}, indent=2, default=str))
+        print(json.dumps({"client_db": refresh_from_client_db(ctx), "sync": jobs.sync(ctx)}, indent=2, default=str))
         return
     if args.command == "export-sheet":
         from wepipeline.sheet_export import export

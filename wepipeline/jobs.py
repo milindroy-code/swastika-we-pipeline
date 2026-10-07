@@ -9,11 +9,11 @@ from datetime import date
 from .assign import assign_new_leads
 from .context import Ctx, iso
 from .db import one
-from .followups import check_overdue, create_system_followups
+from .followups import check_overdue, create_system_followups, reroll_outside_hours
 from .heat import refresh_heat
-from .ingest import sync_leads, sync_webengage
+from .ingest import purge_ignored, sync_leads, sync_webengage
 from .notify import notify
-from .reports import eod_report, morning_note
+from .reports import current_block, eod_report, morning_note, routine_nudge
 
 log = logging.getLogger(__name__)
 
@@ -31,9 +31,11 @@ def sync(ctx: Ctx) -> dict:
     except Exception as e:
         log.exception("WebEngage sync failed")
         result["webengage"] = {"error": str(e)}
+    result["purged_placeholders"] = purge_ignored(ctx)
     result["heat"] = refresh_heat(ctx)
     result["assignment"] = assign_new_leads(ctx)
     result["system_followups"] = create_system_followups(ctx)
+    result["rerolled"] = reroll_outside_hours(ctx)
     result["overdue"] = check_overdue(ctx)
     return result
 
@@ -74,16 +76,35 @@ def send_eod_reports(ctx: Ctx, day: date | None = None) -> int:
     return len(ctx.team())
 
 
+def send_routine_nudges(ctx: Ctx) -> int:
+    """At the start of each routine block, nudge every GM once with their live counts.
+    Only the block running now is sent, so a scheduler that starts late doesn't replay the morning."""
+    now = ctx.now()
+    found = current_block(ctx, now)
+    if not found:
+        return 0
+    block, start, end = found
+    first_block = min(b["time"] for b in ctx.cfg.get("day_structure", []))
+    key = f"routine_{block['time']}"
+    if block.get("nudge", True) is False or block["time"] == first_block or _ran(ctx, key, now.date()):
+        _mark(ctx, key, now.date())  # the first block is covered by the morning note
+        return 0
+    for gm in ctx.callers():
+        notify(ctx, gm["id"], "routine", *routine_nudge(ctx, gm, block, start, end))
+    _mark(ctx, key, now.date())
+    return len(ctx.callers())
+
+
 def tick(ctx: Ctx) -> dict:
     """What the scheduler does every few minutes."""
     now, today = ctx.now(), ctx.today()
     result = {}
     # Inside the office network only (CLIENT_DB_PULL=1): refresh no-deposit clients once an hour.
     if os.environ.get("CLIENT_DB_PULL") == "1" and not _ran(ctx, "client_db", now.strftime("%Y-%m-%dT%H")):
-        from .clientdb import sync_new_clients
+        from .clientdb import refresh_from_client_db
 
         try:
-            result["client_db"] = sync_new_clients(ctx)
+            result["client_db"] = refresh_from_client_db(ctx)
             _mark(ctx, "client_db", now.strftime("%Y-%m-%dT%H"))
         except Exception as e:  # server unreachable must not stop follow-up checks
             log.exception("Client DB pull failed")
@@ -104,6 +125,7 @@ def tick(ctx: Ctx) -> dict:
     if ctx.is_working_day(today):
         if now >= ctx.day_start(today) and not _ran(ctx, "morning_note", today):
             result["morning_notes"] = send_morning_notes(ctx, today)
+        result["routine"] = send_routine_nudges(ctx)
         if now >= ctx.day_end(today) and not _ran(ctx, "eod_report", today):
             result["eod_reports"] = send_eod_reports(ctx, today)
     return result

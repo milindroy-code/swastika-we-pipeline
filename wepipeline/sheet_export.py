@@ -24,7 +24,10 @@ log = logging.getLogger(__name__)
 COLUMNS = [
     ("Rank", "rank"), ("Priority", "priority"), ("Heat score", "heat"), ("Client code", "client"), ("Name", "name"),
     ("Phone", "phone"), ("Category", "category"), ("Registered on", "registered_on"),
-    ("Days since registration", "days_since_registration"), ("Stage", "stage"), ("Lead status", "status"),
+    ("Days since registration", "days_since_registration"), ("Deposit status", "deposit_status"),
+    ("First deposit date", "first_deposit_date"), ("Last trade date", "last_trade_date"),
+    ("Days since last trade", "days_since_last_trade"), ("Holdings (₹)", "holdings"), ("Account status", "account_status"),
+    ("Stage", "stage"), ("Lead status", "status"),
     ("GM", "gm"), ("SM", "sm"), ("Next follow-up", "next_due"), ("Follow-up type", "next_kind"), ("Overdue", "overdue"),
     ("Calls made", "calls"), ("NPC attempts", "npc"), ("Last call outcome", "last_outcome"), ("Last call", "last_call"),
     ("Last active in app", "last_active"), ("App actions (30 d)", "events_30d"), ("Core actions", "core_actions"),
@@ -83,7 +86,13 @@ def build_rows(ctx: Ctx) -> list[dict]:
 def write_csv(ctx: Ctx, data: list[dict]) -> str:
     path = ctx.path((ctx.cfg.get("outputs", {}).get("csv_path")) or "data/exports/customer_priority.csv")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:  # BOM so Excel shows ₹ and emoji correctly
+    try:
+        f = open(path, "w", newline="", encoding="utf-8-sig")  # BOM so Excel shows ₹ and emoji correctly
+    except PermissionError:  # the file is open in Excel: write a timestamped copy instead of failing
+        path = path.with_name(f"{path.stem}_{ctx.now():%Y%m%d_%H%M}{path.suffix}")
+        log.warning("%s is open in another program; writing %s instead", path.name, path)
+        f = open(path, "w", newline="", encoding="utf-8-sig")
+    with f:
         w = csv.writer(f)
         w.writerow([h for h, _ in COLUMNS])
         w.writerows([[r.get(k, "") for _, k in COLUMNS] for r in data])

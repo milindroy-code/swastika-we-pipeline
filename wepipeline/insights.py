@@ -50,6 +50,16 @@ def _when(days: float) -> str:
     return "yesterday" if days < 2 else f"{int(days)} d ago"
 
 
+def _gap(days: int) -> str:
+    """Spoken form of a long gap: '45 days', '8 months', 'over 3 years'."""
+    if days < 60:
+        return f"{days} days"
+    if days < 365:
+        return f"{days // 30} months"
+    years = days // 365
+    return f"over {years} year{'s' if years > 1 else ''}"
+
+
 def _hour_window(h: int) -> str:
     fmt = lambda x: datetime(2000, 1, 1, x % 24).strftime("%I %p").lstrip("0")
     return f"{fmt(h)}–{fmt(h + 1)}"
@@ -90,6 +100,10 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
 
     reg = registration(ctx, lead)
     reg_days = (now.date() - reg.date()).days if reg else None
+    extra = json.loads(lead.get("extra") or "{}")
+    ltd_days = extra.get("days_since_last_trade")
+    holdings = extra.get("holdings")
+    first_dep = extra.get("first_deposit")
     segments = [SEGMENT_LABELS.get(s, s) for s in summary["segments"] if s != "master research"]
 
     # ---- engagement levers: strongest first
@@ -101,6 +115,15 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         levers.append(f"Research-led: accepted {sig['research_call_accepted']['count']} research call(s)")
     if segments:
         levers.append(f"Segment interest: {', '.join(segments)} research")
+    if "trade_placed" in sig and not unfunded:
+        levers.append(f"Order intent: placed {sig['trade_placed']['count']} order(s) recently; check they went through (margin / balance)")
+    if stage == "dormant_trader" and ltd_days is not None:
+        levers.append(f"Dormant: last trade {_gap(ltd_days)} ago ({ltd_days:,} days), now back in the app")
+    if stage == "funded_no_trade":
+        dep = f" ₹{first_dep:,.0f}" if first_dep else ""
+        levers.append(f"Funded, never traded: deposited{dep} but no trade yet")
+    if holdings and holdings >= ctx.cfg.get("heat", {}).get("high_holdings", 100000):
+        levers.append(f"High-value: holdings of ₹{holdings:,.0f}")
     if "deposit_failed" in sig:
         levers.append("Payment friction: a deposit attempt failed")
     if last24 >= 3:
@@ -108,7 +131,7 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     browse = sum(p["count"] for p in non_core)
     if browse >= 5 and not core:
         levers.append(f"Browsing only: {browse} app visits with no core action yet")
-    if reg_days is not None:
+    if reg_days is not None and stage == "kyc_no_deposit":
         if reg_days <= 2:
             levers.append(f"Fresh sign-up: registered {('today' if reg_days == 0 else f'{reg_days} d ago')}")
         elif reg_days > 15 and not core:
@@ -122,7 +145,17 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
 
     # ---- conversation opener: from the strongest lever
     play = PLAYBOOKS[stage]
-    if "trade_placed" in sig and unfunded:
+    if stage == "dormant_trader" and ("research_call_accepted" in sig or segments):
+        gap = _gap(ltd_days) if ltd_days else "a while"
+        opener = (f"It's been {gap} since your last trade, and I saw you've been checking our "
+                  f"{segments[0] + ' ' if segments else ''}research again. Can I help you get set up to act on it?")
+    elif stage == "dormant_trader":
+        opener = f"It's been {_gap(ltd_days)} since your last trade. I wanted to check in and show you what's new in the app." if ltd_days else play["opener"]
+    elif stage == "funded_no_trade":
+        opener = "Your account is funded but you haven't placed a trade yet. Can I walk you through your first order?"
+    elif stage == "active_trader":
+        opener = play["opener"]
+    elif "trade_placed" in sig and unfunded:
         opener = "I noticed you tried to place an order in the app. It may not have gone through because the account isn't funded yet. Shall I help you add funds so your next order goes through?"
     elif "research_call_accepted" in sig:
         opener = "I saw you've been following our research calls. Your account just needs funding before you can act on them. I can help you do that in a couple of minutes."
@@ -140,7 +173,10 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     if "trade_placed" in sig and unfunded:
         ideas.append("Check whether their orders were rejected for low balance, then help them add funds by UPI on the call")
     if "research_call_accepted" in sig or segments:
-        ideas.append("Show where research calls appear in the app, and that acting on them needs a funded account (no return promises)")
+        ideas.append("Show where research calls appear in the app, and that acting on them needs a funded account (no return promises)"
+                     if unfunded else "Show how to act on a research call from the app, and check their available margin (no return promises)")
+    if stage == "dormant_trader":
+        ideas.append("Ask what stopped them trading (charges, app, losses, time) and note it for the SM")
     if "fando_research" in summary["segments"]:
         ideas.append("If they want F&O: explain margin and the mandatory risk disclosure before anything else")
     if momentum == "Rising":
@@ -159,6 +195,12 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     next_action = f"{action}; call{best}" if lead.get("heat_tier") != "cold" or best else action
 
     return {
+        "deposit_status": extra.get("deposit_status", ""),
+        "first_deposit_date": (parse_dt(extra.get("first_deposit_date"), ctx.tz) or now).strftime("%d %b %Y") if extra.get("first_deposit_date") else "",
+        "last_trade_date": (parse_dt(extra.get("last_trade_date"), ctx.tz) or now).strftime("%d %b %Y") if extra.get("last_trade_date") else "",
+        "days_since_last_trade": ltd_days if ltd_days is not None else "",
+        "holdings": round(holdings) if holdings else "",
+        "account_status": extra.get("account_status", ""),
         "registered_on": reg.strftime("%d %b %Y") if reg else "",
         "days_since_registration": reg_days if reg_days is not None else "",
         "stage": stage.replace("_", " "),

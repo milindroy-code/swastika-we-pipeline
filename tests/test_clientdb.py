@@ -99,3 +99,60 @@ def test_connection_string_uses_windows_login_by_default(ctx, monkeypatch):
     monkeypatch.setenv("CLIENT_DB_USER", "growth_ro")
     monkeypatch.setenv("CLIENT_DB_PASSWORD", "x")
     assert "UID=growth_ro" in connection_string(ctx)
+
+
+def lookup(*recs):
+    """Rows shaped like the client-ageing lookup query."""
+    base = {"CLIENT_ID": "", "REGISTRATION_DATE": None, "AccountStatus": "Active", "IsAccountClosed": 0,
+            "FirstDeposit": None, "FirstDepositDate": None, "FTD": None, "LTD": None, "Holdings": None}
+    return pd.DataFrame([{**base, **r} for r in recs])
+
+
+def test_every_lead_gets_an_ageing_category(ctx):
+    for cid in ("NEWBIE", "OLDNODEP", "FUNDED", "DORMANT", "ACTIVE", "CLOSED", "GHOST"):
+        ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, category, source, extra) VALUES (?,?,?,?,?)",
+                         (cid, cid, "Authenticated - no funds added", "WebEngage activity (x.xlsx)", "{}"))
+    d = lambda days: (NOW - timedelta(days=days)).replace(tzinfo=None)
+    res = __import__("wepipeline.clientdb", fromlist=["enrich_leads"]).enrich_leads(ctx, lookup(
+        {"CLIENT_ID": "NEWBIE", "REGISTRATION_DATE": d(3)},
+        {"CLIENT_ID": "OLDNODEP", "REGISTRATION_DATE": d(400)},
+        {"CLIENT_ID": "FUNDED", "REGISTRATION_DATE": d(900), "FirstDeposit": 5000, "FirstDepositDate": d(800)},
+        {"CLIENT_ID": "DORMANT", "REGISTRATION_DATE": d(2000), "FirstDeposit": 1000, "FTD": d(1900).date(), "LTD": d(240).date(),
+         "Holdings": 250000},
+        {"CLIENT_ID": "ACTIVE", "REGISTRATION_DATE": d(700), "FTD": d(600).date(), "LTD": d(5).date()},
+        {"CLIENT_ID": "CLOSED", "REGISTRATION_DATE": d(50), "IsAccountClosed": 1},
+    ))
+    cats = {r["lead_id"]: r["category"] for r in rows(ctx.conn, "SELECT lead_id, category FROM leads WHERE status='open'")}
+    assert cats == {"NEWBIE": "New - no deposit (0-7 days)", "OLDNODEP": "No deposit (90+ days)",
+                    "FUNDED": "Deposited - no trade yet", "DORMANT": "Traded - dormant (30+ days)",
+                    "ACTIVE": "Traded - active (last 30 days)", "GHOST": "Not found in client DB"}
+    assert res["closed_accounts"] == 1
+    assert one(ctx.conn, "SELECT status FROM leads WHERE lead_id='CLOSED'")["status"] == "invalid"
+
+    from wepipeline.insights import customer_insight
+    dormant = one(ctx.conn, "SELECT * FROM leads WHERE lead_id='DORMANT'")
+    ins = customer_insight(ctx, dormant)
+    assert ins["stage"] == "dormant trader" and ins["days_since_last_trade"] == 240
+    assert "Dormant: last trade 8 months ago (240 days)" in ins["levers"] and "High-value: holdings of ₹250,000" in ins["levers"]
+    assert "8 months since your last trade" in ins["opener"]
+
+
+def test_deposit_closes_only_no_deposit_leads(ctx):
+    sync_new_clients(ctx, clients(("NEW1", 3)), pd.DataFrame())
+    ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, category, source, extra) VALUES "
+                     "('OLD1','OLD1','Traded - dormant (30+ days)','WebEngage activity (x.xlsx)','{}')")
+    res = sync_new_clients(ctx, pd.DataFrame(columns=["CLIENT_ID", "REGISTRATION_DATE"]),
+                           pd.DataFrame([{"CLIENT_ID": "NEW1"}, {"CLIENT_ID": "OLD1"}]))
+    assert res["deposited_closed"] == 1
+    status = {r["lead_id"]: r["status"] for r in rows(ctx.conn, "SELECT lead_id, status FROM leads")}
+    assert status == {"NEW1": "converted", "OLD1": "open"}
+
+
+def test_placeholder_rows_are_ignored(ctx, tmp_path):
+    from wepipeline.ingest import purge_ignored
+
+    ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, category, source, extra) VALUES ('Others','Others','x','WebEngage activity (x)','{}')")
+    ctx.conn.execute("INSERT INTO activity_summary (user_id, activity, count) VALUES ('Others','DASHBOARD_OPENED_MOB',999)")
+    assert purge_ignored(ctx) == 1
+    assert one(ctx.conn, "SELECT COUNT(*) n FROM leads")["n"] == 0
+    assert one(ctx.conn, "SELECT COUNT(*) n FROM activity_summary")["n"] == 0

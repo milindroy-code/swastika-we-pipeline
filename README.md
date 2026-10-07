@@ -76,6 +76,30 @@ All weights, tiers and SLAs live under `heat:` in `config.yaml`. The scale of 35
 Core activities are currently `ORDER_PLACED_MOB`, `CALL_ACCEPTED_MOB` and `RECOMMENDATION_LISTING_OPENED_MOB`.
 `DASHBOARD_OPENED_MOB` and `RECOMMENDATION_LANDING_SCREEN_MOB` are non-core. Adjust `heat.core_activities` to change this.
 
+## Client ageing (every lead)
+
+`python run.py pull-clients` looks up **every** lead, from any source, in the back-office client tables. It reads the
+registration date, first deposit, first and last trade (`FTD`, `LTD`), holdings and account status, then gives each
+lead one category, which also sets the pitch stage:
+
+| Category | Rule | Pitch stage |
+|---|---|---|
+| New - no deposit (0-7 / 8-15 / 16-30 days) | never deposited or traded, by days since registration | first deposit |
+| No deposit (31-90 days / 90+ days) | same, registered longer ago | first deposit (re-engage) |
+| Deposited - no trade yet | deposit, no trade | first trade |
+| Traded - dormant (30+ days) | last trade over 30 days ago | re-activation |
+| Traded - active (last 30 days) | traded recently | deepen engagement |
+| Not found in client DB | id not in `tbl_ClientNew` | from app activity |
+
+Closed accounts are dropped. WebEngage's "Others" total row is ignored. A deposit closes only leads in the no-deposit categories.
+
+## Hourly routine
+
+Working hours run 10:00–18:30. `day_structure` in `config.yaml` sets the GM's hour-by-hour plan: huddle, hot leads,
+fresh sign-ups, lunch, NPC round 1, app-activity follow-ups, re-activation, NPC round 2 / evening callbacks, wrap-up.
+At the start of each block every GM gets a nudge with their live counts (overdue, due this hour, hot), and **My day**
+shows the current block. When working hours change, pending follow-ups that now fall outside them move to the next working start.
+
 ## Customer priority list (Google Sheet / CSV)
 
 `python run.py export-sheet` (and the scheduler, hourly) publishes every customer with their rank, priority and score,

@@ -20,7 +20,7 @@ from wepipeline.admin import RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, curre
 from wepipeline.db import set_setting
 from wepipeline.sheet_export import COLUMNS, build_rows, export, update_customer_row
 from wepipeline.insights import customer_insight
-from wepipeline.dialer import DUE_NOW, OVERDUE, dialer_queue, next_call, urgency_counts
+from wepipeline.dialer import DUE_NOW, OVERDUE, dialer_queue, dismiss, next_call, reminders, urgency_counts
 from wepipeline.market import live_notes, refresh as refresh_market
 from wepipeline.excel_report import build_workbook
 from wepipeline.pitch import ai_pitch, format_pitch, market_notes_text, rule_pitch
@@ -247,9 +247,6 @@ def caller_day(agent_id: str) -> None:
 
 
 # ---------------------------------------------------------------- GM call screen (autodialer)
-OUTCOME_BUTTONS = [("not_picked", "📵 Not picked up"), ("busy", "⏳ Busy"), ("switched_off", "📴 Switched off"),
-                   ("interested", "✅ Interested"), ("callback_requested", "🔁 Call back at…"), ("converted", "💰 Converted"),
-                   ("not_interested", "🙅 Not interested"), ("wrong_number", "❌ Wrong number")]
 
 
 @st.fragment(run_every="60s")
@@ -258,7 +255,41 @@ def urgency_strip(agent_id: str) -> None:
     queue = dialer_queue(ctx, agent_id)
     n = urgency_counts(queue)
     today_row = next((r for r in compliance(ctx, ctx.today()) if r["caller_id"] == agent_id), {})
-    c = st.columns(5)
+    dismissed = st.session_state.setdefault(f"dismissed_{agent_id}", set())
+    active = [r for r in reminders(ctx, agent_id, queue) if r["key"] not in dismissed]
+    # pop-up toasts for reminders that appeared since the last refresh
+    seen = st.session_state.setdefault(f"toasted_{agent_id}", set())
+    fresh = [r for r in active if r["key"] not in seen]
+    for r in fresh[:3]:
+        st.toast(f"{r['icon']} {r['text']}")
+    if len(fresh) > 3:
+        st.toast(f"🔔 {len(fresh) - 3} more reminder(s): open the bell")
+    seen.update(r["key"] for r in fresh)
+    nudge = one(ctx.conn, "SELECT id, body FROM notifications WHERE recipient=? AND kind='routine' ORDER BY created_at DESC LIMIT 1", (agent_id,))
+    if nudge and st.session_state.get(f"nudge_{agent_id}") != nudge["id"]:
+        st.session_state[f"nudge_{agent_id}"] = nudge["id"]
+        st.toast("🗓️ " + nudge["body"].split("\n")[0][:160])
+
+    c = st.columns([1, 1, 1, 1, 1.2, 0.9])
+    with c[5].popover(f"🔔 {len(active)}", width="stretch", help="Reminders: click one to call that customer now"):
+        if not active:
+            st.caption("No reminders right now.")
+        for r in active:
+            b1, b2 = st.columns([6, 1])
+            if b1.button(f"{r['icon']} {r['text']}", key=f"rem_{r['key']}", width="stretch"):
+                st.session_state[f"dial_{agent_id}"] = r["lead_id"]  # pinned leads load even if not due yet
+                dismiss(ctx, r)
+                dismissed.add(r["key"])
+                st.rerun()
+            if b2.button("✕", key=f"x_{r['key']}", help="Dismiss"):
+                dismiss(ctx, r)
+                dismissed.add(r["key"])
+                st.rerun()
+        if active and st.button("Dismiss all", key=f"x_all_{agent_id}"):
+            for r in active:
+                dismiss(ctx, r)
+                dismissed.add(r["key"])
+            st.rerun()
     c[0].metric("🔴 Overdue", n["overdue"])
     c[1].metric("⚠️ Escalating in ≤15 min", n["escalating_soon"])
     c[2].metric("🔥 Hot waiting", n["hot_waiting"])
@@ -276,7 +307,6 @@ def _log_and_advance(agent_id: str, lead_id: str, outcome: str, notes: str, next
         st.error(str(e))
         return
     st.session_state.pop(f"dial_{agent_id}", None)
-    st.session_state.pop("cb_for", None)
     st.toast(f"Saved: {OUTCOMES[outcome]['label']}. Next follow-up: {fmt(res['next_due']) or 'none'}. Loading the next call…")
     try:
         update_customer_row(ctx, lead_id)
@@ -286,86 +316,156 @@ def _log_and_advance(agent_id: str, lead_id: str, outcome: str, notes: str, next
     st.rerun()
 
 
+def _chip(text: str, color: str = "gray") -> str:
+    return f":{color}-badge[{text.replace('[', '(').replace(']', ')')}]"
+
+
+STAGE_NAMES = {"kyc pending": "KYC pending", "kyc no deposit": "No deposit yet", "funded no trade": "Funded, no trade yet",
+               "dormant trader": "Dormant trader", "active trader": "Active trader"}
+
+
+def _stage_line(ins: dict) -> str:
+    stage = STAGE_NAMES.get(ins["stage"], ins["stage"].capitalize())
+    if ins["days_since_registration"] != "" and ins["stage"] in {"kyc no deposit", "kyc pending"}:
+        return f"{stage} · registered {ins['days_since_registration']} d ago"
+    if ins["days_since_last_trade"] != "":
+        return f"{stage} · last trade {ins['days_since_last_trade']} d ago"
+    return stage
+
+
 def call_card(agent_id: str, q: dict) -> None:
     lead = lead_by_id(q["lead_id"])
     ins = customer_insight(ctx, lead)
-    who = lead["name"] or lead["lead_id"]
+    lid = lead["lead_id"]
+    who = lead["name"] or lid
+    urgency_color = "red" if q["group"] == OVERDUE else "orange" if q["group"] == DUE_NOW else "blue"
     with st.container(border=True):
-        top_l, top_r = st.columns([3, 2])
-        with top_l:
-            st.markdown(f"### {TIER_BADGE.get(lead['heat_tier'], '')} {who} · heat {lead['heat_score']:.0f}")
-            st.caption(f"Client code **{lead['we_user_id'] or lead['lead_id']}** · {lead['category'] or ''} · {ins['stage']} · "
-                       f"{KIND_LABELS.get(q['kind'], q['kind'])} · NPC attempts {lead['npc_count']}/{ctx.rules.get('max_npc_attempts', 6)}")
-        with top_r:
-            box = st.error if q["group"] == OVERDUE else st.warning if q["group"] == DUE_NOW else st.info
-            box(f"**{q['urgency']}**  \n{q['reason'] or ''}")
-            if lead["phone"]:
-                st.link_button(f"📞 Call {lead['phone']}", f"tel:+91{lead['phone']}", type="primary", width="stretch")
-            else:
-                st.caption("No phone number in the data: dial the client code from the back office.")
-
-        ctx_col, script_col = st.columns([1, 1.3])
-        with ctx_col:
-            st.markdown("**Who they are**")
-            facts = [("Registered", f"{ins['registered_on']} ({ins['days_since_registration']} d ago)" if ins["registered_on"] else ""),
-                     ("Deposit", ins["deposit_status"] + (f", first on {ins['first_deposit_date']}" if ins["first_deposit_date"] else "")),
-                     ("Last trade", f"{ins['last_trade_date']} ({ins['days_since_last_trade']} d ago)" if ins["last_trade_date"] else ""),
-                     ("Holdings", f"₹{ins['holdings']:,}" if ins["holdings"] else ""),
-                     ("Best time to call", ins["best_time"]), ("Momentum", ins["momentum"]),
-                     ("Research segments", ins["segments"])]
-            st.markdown("  \n".join(f"{k}: **{v}**" for k, v in facts if v) or "_No client details yet._")
-            if ins["core_detail"]:
-                st.markdown(f"**In the app:** {ins['core_detail']}")
-            elif ins["non_core_detail"]:
-                st.markdown(f"**In the app:** {ins['non_core_detail']}")
-            else:
-                st.caption("No app activity seen.")
-            history = rows(ctx.conn, "SELECT called_at, outcome, notes FROM calls WHERE lead_id=? ORDER BY called_at DESC LIMIT 3", (lead["lead_id"],))
-            if history:
-                st.markdown("**Last calls**")
-                for h in history:
-                    st.caption(f"{fmt(h['called_at'])} · {OUTCOMES[h['outcome']]['label']}" + (f" · “{h['notes']}”" if h["notes"] else ""))
-        with script_col:
-            st.markdown("**Say this first**")
-            st.success(ins["opener"])
-            if ins["levers"]:
-                st.markdown("**Why they'll listen**  \n" + ins["levers"].replace("\n", "  \n"))
-            st.markdown("**Talking points**  \n" + ins["ideas"].replace("\n", "  \n"))
-            st.markdown(f"**Expect:** {ins['objection']}  \n**Goal of this call:** {ins['next_action']}")
-
-        st.divider()
-        notes = st.text_input("Call notes (what they said, what you promised)", key=f"notes_{lead['lead_id']}")
-        if st.session_state.get("cb_for") == lead["lead_id"]:
-            c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-            default = ctx.now() + timedelta(hours=2)
-            d = c1.date_input("Callback date", default.date(), key=f"cbd_{lead['lead_id']}")
-            t = c2.time_input("Time", default.time().replace(second=0, minute=(default.minute // 15) * 15), step=900, key=f"cbt_{lead['lead_id']}")
-            if c3.button("Save callback", type="primary", width="stretch"):
-                when = datetime.combine(d, t, tz)
-                if when <= ctx.now():
-                    st.error("The callback time must be in the future.")
-                else:
-                    _log_and_advance(agent_id, lead["lead_id"], "callback_requested", notes or "Asked to call back", when)
-            if c4.button("Cancel", width="stretch"):
-                st.session_state.pop("cb_for", None)
-                st.rerun()
+        # 1. who + why now + actions, on one line
+        head, act1, act2 = st.columns([6, 1.3, 1])
+        head.markdown(f"## {TIER_BADGE.get(lead['heat_tier'], '').split()[0]} {who}")
+        head.markdown(_chip(q["urgency"], urgency_color) + " " + _chip(f"heat {lead['heat_score']:.0f}", "violet")
+                      + " " + _chip(KIND_LABELS.get(q["kind"], q["kind"]), "gray"))
+        if lead["phone"]:
+            act1.link_button("📞 Call", f"tel:+91{lead['phone']}", type="primary", width="stretch")
         else:
-            rows_ = [OUTCOME_BUTTONS[:4], OUTCOME_BUTTONS[4:]]
-            for r in rows_:
-                cols = st.columns(4)
-                for col, (outcome, label) in zip(cols, r):
-                    if col.button(label, key=f"o_{outcome}_{lead['lead_id']}", width="stretch",
-                                  type="primary" if outcome in {"interested", "converted"} else "secondary"):
-                        if outcome == "callback_requested":
-                            st.session_state["cb_for"] = lead["lead_id"]
-                            st.rerun()
-                        _log_and_advance(agent_id, lead["lead_id"], outcome, notes)
-            npc = ctx.rules.get("npc_retry_hours", 4)
-            st.caption(f"Not picked up / busy / switched off: the system calls this customer back to you in {npc:g} h automatically.")
-        if st.button("⏭️ Skip for now (moves to the back of the line)", key=f"skip_{lead['lead_id']}"):
-            st.session_state.setdefault(f"skipped_{agent_id}", set()).add(lead["lead_id"])
+            act1.button("📞 Dial from back office", disabled=True, width="stretch", key=f"nophone_{lid}",
+                        help=f"No phone number in the data. Client code: {lead['we_user_id'] or lid}")
+        if act2.button("⏭️ Skip", key=f"skip_{lid}", width="stretch", help="Move this customer to the back of the line"):
+            st.session_state.setdefault(f"skipped_{agent_id}", set()).add(lid)
             st.session_state.pop(f"dial_{agent_id}", None)
             st.rerun()
+
+        # 2. four facts that matter on the call
+        last = one(ctx.conn, "SELECT called_at, outcome FROM calls WHERE lead_id=? ORDER BY called_at DESC LIMIT 1", (lid,))
+        facts = [("🧭", _stage_line(ins)),
+                 ("🕒", f"Best time {ins['best_time']}" if ins["best_time"] else ""),
+                 ("📊", f"Interested in {ins['segments']}" if ins["segments"] else ""),
+                 ("☎️", f"Last call: {OUTCOMES[last['outcome']]['label'].split(' (')[0].lower()} {fmt(last['called_at'], '%d %b %H:%M')}"
+                  if last else "First call")]
+        st.markdown("  ".join(_chip(f"{i} {t}", "blue") for i, t in facts if t))
+
+        # 3. the script: the only big block
+        st.markdown("**Say this:**")
+        st.success(ins["opener"])
+        points = [p.lstrip("• ").strip() for p in ins["ideas"].split("\n") if p.strip()][:3]
+        st.markdown("**Make these points:**  \n" + "  \n".join(f"{n}. {p}" for n, p in enumerate(points, 1)))
+        st.caption(f"**If they say** {ins['objection']}")
+
+        # 4. the rest, folded away
+        with st.expander("More about this customer"):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**Client code:** {lead['we_user_id'] or lid}  \n**Category:** {lead['category'] or '–'}")
+                detail = [("Registered", ins["registered_on"]), ("Deposit", ins["deposit_status"]),
+                          ("First deposit", ins["first_deposit_date"]), ("Last trade", ins["last_trade_date"]),
+                          ("Holdings", f"₹{ins['holdings']:,}" if ins["holdings"] else ""), ("Account", ins["account_status"]),
+                          ("Momentum", ins["momentum"]),
+                          ("NPC attempts", f"{lead['npc_count']} of {ctx.rules.get('max_npc_attempts', 6)}")]
+                st.markdown("  \n".join(f"{k}: **{v}**" for k, v in detail if v))
+            with c2:
+                if ins["levers"]:
+                    st.markdown("**Why they'll listen**  \n" + ins["levers"].replace("\n", "  \n"))
+                st.markdown(f"**Goal:** {ins['next_action']}")
+            if ins["core_detail"] or ins["non_core_detail"]:
+                st.markdown(f"**In the app:** {ins['core_detail'] or ins['non_core_detail']}")
+            history = rows(ctx.conn, "SELECT called_at, outcome, notes FROM calls WHERE lead_id=? ORDER BY called_at DESC LIMIT 5", (lid,))
+            for h in history:
+                st.caption(f"{fmt(h['called_at'])} · {OUTCOMES[h['outcome']]['label']}" + (f" · “{h['notes']}”" if h["notes"] else ""))
+
+        st.divider()
+        outcome_panel(agent_id, lead)
+
+
+NO_REACH = [("not_picked", "📵 Not picked up"), ("busy", "⏳ Busy"), ("switched_off", "📴 Switched off"), ("wrong_number", "❌ Wrong number")]
+REACHED_OPTIONS = [("converted", "💰 Converted"), ("interested", "✅ Interested"), ("callback_requested", "🔁 Wants a call back"),
+                   ("not_interested", "🙅 Not interested")]
+WHEN_CHOICES = ["In 1 h", "In 2 h", "Tomorrow 11:00", "Tomorrow 16:00", "Pick a time"]
+
+
+def _when(choice: str, lead_id: str):
+    now = ctx.now()
+    if choice == "In 1 h":
+        return ctx.roll_to_working_hours(now + timedelta(hours=1))
+    if choice == "In 2 h":
+        return ctx.roll_to_working_hours(now + timedelta(hours=2))
+    if choice in {"Tomorrow 11:00", "Tomorrow 16:00"}:
+        day = ctx.next_working_day(now.date())
+        return datetime.combine(day, datetime.strptime(choice.split()[1], "%H:%M").time(), tz)
+    if choice == "Pick a time":
+        c1, c2 = st.columns(2)
+        default = now + timedelta(hours=3)
+        d = c1.date_input("Date", default.date(), key=f"pd_{lead_id}")
+        t = c2.time_input("Time", default.time().replace(second=0, minute=(default.minute // 15) * 15), step=900, key=f"pt_{lead_id}")
+        return datetime.combine(d, t, tz)
+    return None
+
+
+def outcome_panel(agent_id: str, lead: dict) -> None:
+    """Step 1: did you reach them? Step 2 (only if yes): how it went, notes, and when to call next."""
+    lid = lead["lead_id"]
+    picked = st.session_state.get(f"outcome_{lid}")
+    npc_h = ctx.rules.get("npc_retry_hours", 4)
+
+    if picked is None:
+        st.markdown("**Couldn't reach them?** One click saves it and brings up the next call.")
+        cols = st.columns(4)
+        for col, (outcome, label) in zip(cols, NO_REACH):
+            if col.button(label, key=f"o_{outcome}_{lid}", width="stretch"):
+                _log_and_advance(agent_id, lid, outcome, "")
+        st.caption(f"Not picked up / busy / switched off come back to your queue automatically in {npc_h:g} h.")
+        st.markdown("**Spoke to them?** Pick how it went.")
+        cols = st.columns(4)
+        for col, (outcome, label) in zip(cols, REACHED_OPTIONS):
+            if col.button(label, key=f"o_{outcome}_{lid}", width="stretch", type="primary"):
+                st.session_state[f"outcome_{lid}"] = outcome
+                st.rerun()
+        return
+
+    label = dict(REACHED_OPTIONS)[picked]
+    with st.container(border=True):
+        top1, top2 = st.columns([4, 1])
+        top1.markdown(f"**{label}**: add a note and save.")
+        if top2.button("Change", key=f"chg_{lid}", width="stretch"):
+            st.session_state.pop(f"outcome_{lid}", None)
+            st.rerun()
+        notes = st.text_input("What did they say? What did you promise?", key=f"notes_{lid}",
+                              placeholder="e.g. Will add ₹5,000 by UPI tonight")
+        when = None
+        if picked in {"interested", "callback_requested"}:
+            required = picked == "callback_requested"
+            choice = st.pills("When should you call next?" + ("" if required else " (optional)"), WHEN_CHOICES,
+                              default="In 2 h" if required else None, key=f"when_{lid}")
+            when = _when(choice, lid) if choice else None
+            if when:
+                st.caption(f"Next follow-up: **{when:%a %d %b, %H:%M}**")
+        if st.button("💾 Save & next call", key=f"save_{lid}", type="primary", width="stretch"):
+            if picked == "callback_requested" and not when:
+                st.error("Pick when to call back.")
+            elif when and when <= ctx.now():
+                st.error("The follow-up time must be in the future.")
+            else:
+                st.session_state.pop(f"outcome_{lid}", None)
+                _log_and_advance(agent_id, lid, picked, notes, when)
 
 
 def dialer(agent_id: str) -> None:
@@ -387,20 +487,18 @@ def dialer(agent_id: str) -> None:
                 st.rerun()
         return
     st.session_state[f"dial_{agent_id}"] = current["lead_id"]
-    st.markdown(f"#### Now calling ({1 + sum(1 for q in queue if q['group'] <= DUE_NOW) - 1} more due after this)")
     call_card(agent_id, current)
 
     upcoming = [q for q in queue if q["lead_id"] != current["lead_id"]][:6]
     if upcoming:
-        st.markdown("#### Up next")
-        for q in upcoming:
-            c1, c2, c3, c4 = st.columns([1.1, 2.2, 3.2, 0.9])
-            c1.markdown(f"{TIER_BADGE.get(q['heat_tier'], '')} {q['heat_score']:.0f}")
-            c2.markdown(f"**{q['name'] or q['lead_id']}**  \n<small>{q['urgency']}</small>", unsafe_allow_html=True)
-            c3.caption(q["reason"] or KIND_LABELS.get(q["kind"], q["kind"]))
-            if c4.button("Call now", key=f"jump_{q['id']}"):
-                st.session_state[f"dial_{agent_id}"] = q["lead_id"]
-                st.rerun()
+        with st.expander(f"Up next ({sum(1 for q in queue if q['group'] <= DUE_NOW) - 1} more due now)"):
+            for q in upcoming:
+                c1, c2, c3 = st.columns([4, 4, 1])
+                c1.markdown(f"{TIER_BADGE.get(q['heat_tier'], '').split()[0]} **{q['name'] or q['lead_id']}** · {q['urgency']}")
+                c2.caption(q["reason"] or KIND_LABELS.get(q["kind"], q["kind"]))
+                if c3.button("Call", key=f"jump_{q['id']}", width="stretch"):
+                    st.session_state[f"dial_{agent_id}"] = q["lead_id"]
+                    st.rerun()
     if ahead and st.button("Stop calling ahead"):
         st.session_state[f"ahead_{agent_id}"] = False
         st.rerun()
@@ -416,21 +514,7 @@ def gm_sidebar(agent_id: str) -> None:
         now_ = block and block[0]["time"] == x["time"]
         text = x["block"].split(":")[0] if ":" in x["block"][:60] else x["block"][:60]
         sb.markdown(f"{'▶️ **' if now_ else ''}{x['time']} {text}{'**' if now_ else ''}")
-    alerts = rows(ctx.conn, "SELECT * FROM alerts WHERE agent_id=? AND manager_id IS NULL AND acknowledged_at IS NULL "
-                            "AND level='warning' ORDER BY created_at DESC LIMIT 6", (agent_id,))
-    nudge = one(ctx.conn, "SELECT * FROM notifications WHERE recipient=? AND kind='routine' ORDER BY created_at DESC LIMIT 1", (agent_id,))
-    with sb.expander(f"🔔 Reminders & alerts ({len(alerts)})", expanded=bool(alerts)):
-        if nudge:
-            st.caption(f"{fmt(nudge['created_at'], '%H:%M')} · {nudge['body'][:220]}")
-        for a in alerts:
-            st.markdown(f"⚠️ {a['message']}")
-        if alerts and st.button("Mark all as seen", key="ack_all"):
-            ctx.conn.execute("UPDATE alerts SET acknowledged_at=? WHERE agent_id=? AND manager_id IS NULL AND acknowledged_at IS NULL",
-                             (iso(ctx.now()), agent_id))
-            ctx.conn.commit()
-            st.rerun()
-        if not alerts and not nudge:
-            st.caption("Nothing new.")
+    sb.caption("🔔 Reminders pop up on screen and sit in the bell at the top: click one to call that customer.")
     live = live_notes(ctx)["notes"]
     if live:
         with sb.expander("📈 Market now"):

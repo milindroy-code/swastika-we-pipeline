@@ -68,3 +68,23 @@ def test_escalated_backlog_puts_hot_first_and_reads_well(ctx):
     assert [x["lead_id"] for x in q] == ["NEWER_HOT", "OLD_COLD"]
     assert q[0]["urgency"] == "Overdue 3 h · already escalated to your SM"
     assert q[1]["urgency"] == "Overdue 6 d 0 h · already escalated to your SM"
+
+
+def test_reminders_one_per_customer_and_clickable(ctx):
+    from wepipeline.dialer import dismiss, reminders
+    from wepipeline.followups import check_overdue
+    from wepipeline.db import one
+
+    lead(ctx, "LATE", "cold", -30)          # overdue: gets a warning alert
+    lead(ctx, "SOON", "warm", 6)            # callback due in 6 minutes
+    lead(ctx, "HOT", "hot", 120)
+    add_followup(ctx, "HOT", "gm_01", NOW, "system", "🔥 Turned hot (score 91): Accepted a research call ×4")
+    lead(ctx, "QUIET", "cold", 300)         # nothing to remind about
+    check_overdue(ctx)
+    items = reminders(ctx, "gm_01")
+    assert [(r["icon"], r["lead_id"]) for r in items] == [("⚠️", "LATE"), ("🔥", "HOT"), ("⏰", "SOON")]
+    assert items[0]["text"].startswith("LATE · overdue 30 min")
+    assert items[2]["text"] == "First call with SOON at 12:06"
+    dismiss(ctx, items[0])
+    assert one(ctx.conn, "SELECT acknowledged_at FROM alerts WHERE lead_id='LATE'")["acknowledged_at"]
+    assert [r["lead_id"] for r in reminders(ctx, "gm_01")] == ["HOT", "SOON"]

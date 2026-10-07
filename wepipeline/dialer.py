@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from .context import Ctx, parse_dt
-from .followups import queue_for
+from .context import Ctx, iso, parse_dt
+from .db import rows
+from .followups import KIND_LABELS, queue_for
 from .heat import TIER_RANK
 
 OVERDUE, DUE_NOW, LATER_TODAY, UPCOMING = 0, 1, 2, 3
@@ -78,3 +79,39 @@ def urgency_counts(queue: list[dict]) -> dict:
         "due_now": sum(1 for q in queue if q["group"] == DUE_NOW),
         "later_today": sum(1 for q in queue if q["group"] == LATER_TODAY),
     }
+
+
+def reminders(ctx: Ctx, agent_id: str, queue: list[dict] | None = None) -> list[dict]:
+    """Actionable reminders for a GM, one per customer, most important first:
+    overdue warnings (⚠️), leads that just turned hot (🔥), callbacks / follow-ups due in the next 10 minutes (⏰)."""
+    queue = dialer_queue(ctx, agent_id) if queue is None else queue
+    by_lead = {q["lead_id"]: q for q in queue}
+    out, seen = [], set()
+
+    def add(item):
+        if item["lead_id"] not in seen and item["lead_id"] in by_lead:  # only customers still waiting for a call
+            seen.add(item["lead_id"])
+            out.append(item)
+
+    for a in rows(ctx.conn, "SELECT * FROM alerts WHERE agent_id=? AND manager_id IS NULL AND acknowledged_at IS NULL "
+                            "AND level='warning' ORDER BY created_at", (agent_id,)):
+        q = by_lead.get(a["lead_id"])
+        text = f"{(q or {}).get('name') or a['lead_id']} · {q['urgency'].lower()}" if q else a["message"]
+        add({"key": f"alert_{a['id']}", "lead_id": a["lead_id"], "icon": "⚠️", "text": text, "alert_id": a["id"]})
+    for q in queue:
+        if q["kind"] == "system" and (q["reason"] or "").startswith("🔥 Turned hot"):
+            add({"key": f"hot_{q['id']}", "lead_id": q["lead_id"], "icon": "🔥",
+                 "text": f"{q['name'] or q['lead_id']} just turned hot", "alert_id": None})
+    for q in queue:
+        if q["group"] == DUE_NOW and q["late_min"] < 0:
+            add({"key": f"due_{q['id']}", "lead_id": q["lead_id"], "icon": "⏰",
+                 "text": f"{KIND_LABELS.get(q['kind'], q['kind'])} with {q['name'] or q['lead_id']} at {q['due']:%H:%M}",
+                 "alert_id": None})
+    return out
+
+
+def dismiss(ctx: Ctx, item: dict) -> None:
+    """Mark a reminder as seen. Warnings are recorded in the database; the others only live in the session."""
+    if item.get("alert_id"):
+        ctx.conn.execute("UPDATE alerts SET acknowledged_at=? WHERE id=?", (iso(ctx.now()), item["alert_id"]))
+        ctx.conn.commit()

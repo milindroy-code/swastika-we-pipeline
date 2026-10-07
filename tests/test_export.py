@@ -73,10 +73,27 @@ class FakeWS:
     def clear(self): self.calls.append("clear")
     def resize(self, rows, cols): self.calls.append(("resize", rows, cols))
     def update(self, values, range_name, value_input_option=None):
-        self.values, self.input = values, value_input_option
+        self.input = value_input_option
+        start = int(range_name[1:]) if range_name != "A1" else 1
+        if start == 1:
+            self.values = [list(v) for v in values]
+        else:
+            self.values[start - 1] = list(values[0])
     def freeze(self, rows, cols): self.calls.append("freeze")
     def format(self, rng, fmt): self.calls.append("format")
     def set_basic_filter(self): self.calls.append("filter")
+
+    def find(self, query, in_column=None):
+        for i, row in enumerate(self.values or [], 1):
+            if len(row) >= in_column and row[in_column - 1] == query:
+                return type("Cell", (), {"row": i, "col": in_column})()
+        return None
+
+    def cell(self, row, col):
+        return type("Cell", (), {"value": self.values[row - 1][col - 1]})()
+
+    def append_row(self, values, value_input_option=None):
+        self.values.append(values)
 
 
 class FakeBook:
@@ -119,3 +136,33 @@ def test_sheet_failure_does_not_break_export(ctx, monkeypatch):
     ctx.cfg["outputs"]["google_sheet"].update(enabled=True, spreadsheet_key="KEY")
     res = sheet_export.export(ctx)
     assert res["rows"] == 3 and "error" in res["google_sheet"]
+
+
+def test_logged_call_updates_its_row_immediately(ctx, monkeypatch):
+    from wepipeline.followups import log_call
+    from wepipeline.db import one
+
+    book = FakeBook()
+    monkeypatch.setattr(sheet_export, "_client", lambda c: type("C", (), {"open_by_key": lambda self, k: book})())
+    ctx.cfg["outputs"]["google_sheet"].update(enabled=True, spreadsheet_key="KEY")
+    sheet_export.export(ctx)
+    ws = book.tabs["Customers"]
+    header = ws.values[0]
+    row_of = lambda cid: next(r for r in ws.values[1:] if r[header.index("Client code")] == cid)
+    before = list(row_of("BROWSER"))
+
+    agent = one(ctx.conn, "SELECT assigned_to FROM leads WHERE lead_id='BROWSER'")["assigned_to"]
+    log_call(ctx, "BROWSER", agent, "not_picked", "No answer, will retry")
+    res = sheet_export.update_customer_row(ctx, "BROWSER")
+    after = row_of("BROWSER")
+    assert res["client"] == "BROWSER"
+    assert after[header.index("Rank")] == before[header.index("Rank")]  # rank kept until the hourly refresh
+    assert after[header.index("Calls made")] == 1 and after[header.index("NPC attempts")] == 1
+    assert after[header.index("Last call outcome")] == "Not picked up (NPC)"
+    assert after[header.index("Last call notes")] == "No answer, will retry"
+    assert after[header.index("Follow-up type")] == "NPC retry"
+    assert len(ws.values) == 4  # updated in place, not appended
+
+
+def test_row_update_is_skipped_without_a_sheet(ctx):
+    assert sheet_export.update_customer_row(ctx, "BUYER") is None

@@ -30,6 +30,7 @@ COLUMNS = [
     ("Stage", "stage"), ("Lead status", "status"),
     ("GM", "gm"), ("SM", "sm"), ("Next follow-up", "next_due"), ("Follow-up type", "next_kind"), ("Overdue", "overdue"),
     ("Calls made", "calls"), ("NPC attempts", "npc"), ("Last call outcome", "last_outcome"), ("Last call", "last_call"),
+    ("Last call notes", "last_notes"),
     ("Last active in app", "last_active"), ("App actions (30 d)", "events_30d"), ("Core actions", "core_actions"),
     ("Non-core actions", "non_core_actions"), ("Core activity (type × times, recency)", "core_detail"),
     ("Non-core activity", "non_core_detail"), ("Momentum", "momentum"), ("Best time to call", "best_time"),
@@ -41,16 +42,22 @@ TIER_COLORS = {"🔥 Hot": {"red": 0.99, "green": 0.87, "blue": 0.85}, "🌤️ 
                "❄️ Cold": {"red": 0.9, "green": 0.94, "blue": 0.99}}
 
 
-def build_rows(ctx: Ctx) -> list[dict]:
-    """Every lead, open ones first by priority, then everything else."""
+def build_rows(ctx: Ctx, lead_id: str | None = None) -> list[dict]:
+    """Every lead (or just one), open ones first by priority, then everything else."""
     now = ctx.now()
     stamp = now.strftime("%d %b %H:%M")
     grace = ctx.rules.get("warning_after_minutes", 15)
-    calls = {r["lead_id"]: r for r in rows(ctx.conn, "SELECT lead_id, COUNT(*) n, MAX(called_at) last FROM calls GROUP BY lead_id")}
+    only = " WHERE lead_id=?" if lead_id else ""
+    args = (lead_id,) if lead_id else ()
+    calls = {r["lead_id"]: r for r in rows(ctx.conn, f"SELECT lead_id, COUNT(*) n, MAX(called_at) last FROM calls{only} GROUP BY lead_id", args)}
+    notes = {}
+    for r in rows(ctx.conn, f"SELECT lead_id, notes FROM calls{only} ORDER BY called_at", args):
+        notes[r["lead_id"]] = r["notes"] or ""  # ascending, so the latest call's notes are kept
     nexts = {}
-    for f in rows(ctx.conn, "SELECT lead_id, due_at, kind FROM followups WHERE status='pending' ORDER BY due_at DESC"):
+    pending = " AND lead_id=?" if lead_id else ""
+    for f in rows(ctx.conn, f"SELECT lead_id, due_at, kind FROM followups WHERE status='pending'{pending} ORDER BY due_at DESC", args):
         nexts[f["lead_id"]] = f  # rows come latest-first, so the earliest due one is kept
-    leads = rows(ctx.conn, "SELECT * FROM leads ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, heat_score DESC, first_seen_at DESC")
+    leads = rows(ctx.conn, f"SELECT * FROM leads{only} ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, heat_score DESC, first_seen_at DESC", args)
     out = []
     for rank, lead in enumerate(leads, 1):
         ins = customer_insight(ctx, lead)
@@ -76,6 +83,7 @@ def build_rows(ctx: Ctx) -> list[dict]:
             "npc": lead["npc_count"],
             "last_outcome": OUTCOMES.get(lead["last_outcome"] or "", {}).get("label", lead["last_outcome"] or ""),
             "last_call": parse_dt(c["last"], ctx.tz).strftime("%d %b %H:%M") if c.get("last") else "",
+            "last_notes": notes.get(lead["lead_id"], ""),
             "last_active": humanize_ago(ctx, ins["last_active"]) if ins["last_active"] else "no activity seen",
             "heat_reasons": lead["heat_reasons"] or "",
             "updated": stamp,
@@ -196,11 +204,37 @@ def push_to_google_sheet(ctx: Ctx, data: list[dict]) -> dict:
     return {"sheet": book.url, "rows": len(data)}
 
 
+def sheet_enabled(ctx: Ctx) -> bool:
+    return bool(ctx.cfg.get("outputs", {}).get("google_sheet", {}).get("enabled") or os.environ.get("GOOGLE_SHEET_KEY"))
+
+
+def update_customer_row(ctx: Ctx, lead_id: str) -> dict | None:
+    """Rewrite one customer's row in the live sheet right after a call (rank is kept until the hourly refresh).
+    Returns None when no Google Sheet is configured."""
+    if not sheet_enabled(ctx):
+        return None
+    cfg = ctx.cfg.get("outputs", {}).get("google_sheet", {})
+    found = build_rows(ctx, lead_id)
+    if not found:
+        return {"error": f"unknown lead {lead_id}"}
+    row = found[0]
+    book = _client(ctx).open_by_key(os.environ.get("GOOGLE_SHEET_KEY") or cfg["spreadsheet_key"])
+    ws = book.worksheet(cfg.get("customers_tab", "Customers"))
+    client_col = [k for _, k in COLUMNS].index("client") + 1
+    cell = ws.find(row["client"], in_column=client_col)
+    values = [row.get(k, "") for _, k in COLUMNS]
+    if cell is None:  # customer not in the sheet yet: add at the bottom until the next full refresh
+        ws.append_row(values, value_input_option="RAW")
+        return {"appended": row["client"]}
+    values[0] = ws.cell(cell.row, 1).value or ""  # keep the current rank
+    ws.update([values], f"A{cell.row}", value_input_option="RAW")
+    return {"updated_row": cell.row, "client": row["client"]}
+
+
 def export(ctx: Ctx) -> dict:
     data = build_rows(ctx)
     result = {"rows": len(data), "csv": write_csv(ctx, data)}
-    cfg = ctx.cfg.get("outputs", {}).get("google_sheet", {})
-    if cfg.get("enabled") or os.environ.get("GOOGLE_SHEET_KEY"):
+    if sheet_enabled(ctx):
         try:
             result["google_sheet"] = push_to_google_sheet(ctx, data)
         except Exception as e:  # a Sheets outage must not break follow-up checks

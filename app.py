@@ -18,7 +18,7 @@ from wepipeline.followups import KIND_LABELS, OUTCOMES, log_call, queue_for, rea
 from wepipeline.ingest import sync_webengage
 from wepipeline.admin import RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, current_sla, save_rules
 from wepipeline.db import set_setting
-from wepipeline.sheet_export import COLUMNS, build_rows, export
+from wepipeline.sheet_export import COLUMNS, build_rows, export, update_customer_row
 from wepipeline.pitch import ai_pitch, format_pitch, market_notes_text, rule_pitch
 from wepipeline.reports import classify, compliance, current_block, eod_report, misses
 
@@ -114,6 +114,12 @@ def call_form(lead: dict, agent_id: str, key: str) -> None:
                 st.error(str(e))
                 return
             st.toast(f"Saved. Next follow-up: {fmt(res['next_due']) or 'none'} · lead status: {res['status']}")
+            try:  # reflect the call in the live Google Sheet straight away
+                if update_customer_row(ctx, lead["lead_id"]):
+                    st.toast("Google Sheet updated.")
+            except Exception as e:  # the call is saved either way; the hourly refresh will catch up
+                st.toast(f"Saved, but the Google Sheet could not be updated now ({type(e).__name__}). It will catch up within the hour.")
+            _customer_rows.clear()
             st.rerun()
 
 
@@ -335,6 +341,10 @@ def leads_page() -> None:
         to = st.selectbox("New GM", [m["id"] for m in ctx.callers()], format_func=lambda i: ctx.member(i)["name"])
         if st.form_submit_button("Reassign") and lead_id:
             reassign_lead(ctx, lead_id, to)
+            try:
+                update_customer_row(ctx, lead_id)
+            except Exception:
+                pass  # the hourly refresh will catch up
             st.toast("Reassigned; pending follow-ups moved too.")
             st.rerun()
 

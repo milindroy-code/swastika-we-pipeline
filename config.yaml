@@ -216,6 +216,12 @@ activity_labels:
   RECOMMENDATION_LANDING_SCREEN_MOB: Visited research home
   DASHBOARD_OPENED_MOB: Opened the app dashboard
 
+# Live market notes, refreshed by the scheduler and sanity-checked (NSE vs Yahoo, ranges, freshness).
+# Headlines are kept only when they are macro / market-wide; anything that reads like a stock tip is dropped.
+market:
+  enabled: true
+  refresh_minutes: 15
+
 market_notes_file: data/market_notes.md
 
 ai_pitch:

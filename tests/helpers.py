@@ -15,6 +15,7 @@ def open_test_ctx(cfg: dict):
     out = cfg.setdefault("outputs", {})
     out["csv_path"] = str(Path(cfg["database"]).parent / "customer_priority.csv")
     out["google_sheet"] = {**out.get("google_sheet", {}), "enabled": False}
+    cfg["market"] = {"enabled": False}  # tests never call live market feeds
     ctx = open_ctx(cfg=cfg)
     if cfg["database_url"]:
         ctx.conn.execute(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE")

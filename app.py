@@ -20,6 +20,7 @@ from wepipeline.admin import RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, curre
 from wepipeline.db import set_setting
 from wepipeline.sheet_export import COLUMNS, build_rows, export, update_customer_row
 from wepipeline.insights import customer_insight
+from wepipeline.market import live_notes, refresh as refresh_market
 from wepipeline.excel_report import build_workbook
 from wepipeline.pitch import ai_pitch, format_pitch, market_notes_text, rule_pitch
 from wepipeline.reports import classify, compliance, current_block, eod_report, misses
@@ -216,6 +217,10 @@ def caller_day(agent_id: str) -> None:
     if block:
         b, start, end = block
         st.info(f"**Now ({start:%H:%M}–{end:%H:%M}):** {b['block']}")
+    live = live_notes(ctx)["notes"]
+    if live:
+        with st.expander("📈 Market now (facts for context, never stock tips)"):
+            st.markdown("\n".join(f"- {n['text']}" for n in live))
     with st.expander("🗓️ Today's hourly routine"):
         st.markdown("\n".join(f"- **{x['time']}**: {x['block']}" for x in ctx.cfg.get("day_structure", [])))
     with st.expander("⏱️ Your follow-up time limits (set by admin)"):
@@ -429,8 +434,27 @@ def admin_page() -> None:
     st.caption(f"Source: **{src['type']}** {src.get('path') if src['type'] == 'csv' else src.get('url') or src.get('spreadsheet_key')}. "
                "Change it in config.yaml. Syncs every few minutes when the scheduler is running.")
 
-    st.subheader("Today's market notes")
-    text = st.text_area("One talking point per line. Used in pitches and the morning note.", market_notes_text(ctx), height=180)
+    st.subheader("Live market notes")
+    live = live_notes(ctx)
+    c1, c2 = st.columns([3, 1])
+    c1.caption(f"Sources: {', '.join(live.get('sources') or []) or 'not fetched yet'} · updated {fmt(live.get('updated')) or 'never'}"
+               + (f" · NSE as of {live['as_of']}" if live.get("as_of") else "") + ". Refreshed every 15 minutes by the scheduler.")
+    if c2.button("Refresh now"):
+        with st.spinner("Fetching NSE, Yahoo and headlines…"):
+            refresh_market(ctx)
+        st.rerun()
+    for n in live["notes"]:
+        st.markdown(f"- {n['text']}")
+    checks = live.get("checks") or []
+    if checks:
+        failed = [c for c in checks if not c["ok"]]
+        with st.expander(f"Sanity checks: {len(checks) - len(failed)}/{len(checks)} passed" + (" ⚠️" if failed else " ✅")):
+            st.dataframe(pd.DataFrame([{"": "✅" if c["ok"] else "❌", "check": c["check"], "detail": c["detail"],
+                                        "action": f"dropped {c['drop']}" if c["drop"] else ""} for c in checks]),
+                         hide_index=True, width="stretch")
+    st.subheader("Your own market notes")
+    text = st.text_area("Optional. One talking point per line; shown before the live notes in pitches and the morning note.",
+                        market_notes_text(ctx), height=140)
     if st.button("Save market notes"):
         set_setting(ctx.conn, "market_notes", text, iso(ctx.now()))
         st.toast("Saved.")

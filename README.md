@@ -93,6 +93,24 @@ lead one category, which also sets the pitch stage:
 
 Closed accounts are dropped. WebEngage's "Others" total row is ignored. A deposit closes only leads in the no-deposit categories.
 
+## Live market notes
+
+Every 15 minutes the scheduler (or `python run.py market`) builds short, factual talking points:
+- **NSE index feed:** Nifty 50 with breadth, Bank Nifty, best and worst sector, Midcap / Smallcap, India VIX.
+- **Yahoo Finance:** Sensex, USD/INR, gold, crude.
+- **ET Markets / Google News:** macro and market-wide headlines.
+
+Each refresh is **sanity-checked**, and a failing source is dropped rather than shown:
+- NSE vs Yahoo on the same indices: level within 0.5 % and change within 0.3 points (VIX 2 %).
+- Sensex moves with Nifty.
+- Plausible ranges for index moves, VIX, USD/INR, gold and crude.
+- Breadth agrees with the index direction.
+- Data freshness.
+
+Headlines that read like stock tips ("picks", "stocks to buy", "target", "rallied up to") are always dropped.
+Pitches pick the note that matches the customer's research segment (F&O → VIX / Bank Nifty, Commodity → gold / crude).
+SMs can add their own notes on **Data & admin**, which appear first. The page also shows the live notes and every check.
+
 ## Hourly routine
 
 Working hours run 10:00–18:30. `day_structure` in `config.yaml` sets the GM's hour-by-hour plan: huddle, hot leads,

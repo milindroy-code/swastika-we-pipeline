@@ -184,9 +184,11 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     if not core and browse:
         ideas.append("Guide them to one first core step (research → add funds) while they're on the call")
     ideas += [p for p in play["points"] if p not in ideas][: max(0, 3 - len(ideas))]
-    notes = market_notes(ctx, 1)
-    if notes:
-        ideas.append(f"Market context: {notes[0]}")
+    from .market import note_for
+
+    context = note_for(ctx, segments) or next(iter(market_notes(ctx, 1)), None)
+    if context:
+        ideas.append(f"Market context (facts only, no tips): {context}")
 
     best = f" around {best_time}" if best_time else ""
     action = {"kyc_pending": "Complete KYC on the call", "kyc_no_deposit": "Get the first deposit on the call",

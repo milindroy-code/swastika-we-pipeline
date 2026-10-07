@@ -110,6 +110,14 @@ def tick(ctx: Ctx) -> dict:
             log.exception("Client DB pull failed")
             result["client_db"] = {"error": str(e)}
     result["sync"] = sync(ctx)
+    from .market import due_for_refresh, refresh as refresh_market
+
+    if (ctx.cfg.get("market") or {}).get("enabled", True) and due_for_refresh(ctx):
+        try:
+            result["market"] = refresh_market(ctx)
+        except Exception as e:  # a feed outage must not stop follow-up checks
+            log.exception("Market notes refresh failed")
+            result["market"] = {"error": str(e)}
     # Refresh the customer priority sheet / CSV (hourly by default).
     every = int(ctx.cfg.get("outputs", {}).get("export_every_minutes", 60))
     slot = now.replace(minute=(now.minute // every) * every if every < 60 else 0).strftime("%Y-%m-%dT%H:%M")

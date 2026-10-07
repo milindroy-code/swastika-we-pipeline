@@ -73,8 +73,13 @@ def market_notes_text(ctx: Ctx) -> str:
 
 
 def market_notes(ctx: Ctx, limit: int = 5) -> list[str]:
+    """The SM's own notes first (Data & admin page), then live market notes (refreshed every 15 min)."""
+    from .market import live_notes
+
     lines = [ln.strip().lstrip("-*• ").strip() for ln in market_notes_text(ctx).splitlines()]
-    return [ln for ln in lines if ln and not ln.startswith("#")][:limit]
+    own = [ln for ln in lines if ln and not ln.startswith("#") and not ln.startswith("[Sample]")]
+    live = [n["text"] for n in live_notes(ctx)["notes"]]
+    return (own + live)[:limit]
 
 
 def activity_hooks(ctx: Ctx, summary: dict) -> list[str]:

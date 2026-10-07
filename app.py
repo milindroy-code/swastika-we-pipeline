@@ -19,6 +19,8 @@ from wepipeline.ingest import sync_webengage
 from wepipeline.admin import RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, current_sla, save_rules
 from wepipeline.db import set_setting
 from wepipeline.sheet_export import COLUMNS, build_rows, export, update_customer_row
+from wepipeline.insights import customer_insight
+from wepipeline.excel_report import build_workbook
 from wepipeline.pitch import ai_pitch, format_pitch, market_notes_text, rule_pitch
 from wepipeline.reports import classify, compliance, current_block, eod_report, misses
 
@@ -58,6 +60,8 @@ def lead_by_id(lead_id: str) -> dict:
 
 
 # ---------------------------------------------------------------- sidebar
+if os.environ.get("WEP_DEMO_LABEL"):
+    st.warning(f"🧪 {os.environ['WEP_DEMO_LABEL']}. The clock is frozen at {ctx.now():%a %d %b %H:%M}.")
 team = ctx.team()
 labels = {m["id"]: f"{m['name']} · {m.get('title') or ('SM' if ctx.is_sm(m) else 'GM')}" for m in team}
 me_id = st.sidebar.selectbox("You are", list(labels), format_func=labels.get)
@@ -125,14 +129,25 @@ def call_form(lead: dict, agent_id: str, key: str) -> None:
 
 def lead_panel(lead: dict, agent_id: str, key: str) -> None:
     summary = summarize(ctx, lead)
+    ins = customer_insight(ctx, lead)
     left, right = st.columns([1, 1.25])
     with left:
         st.markdown(f"**{lead['name'] or lead['lead_id']}** · Client code {lead['we_user_id'] or lead['lead_id']}"
                     + (f" · {lead['phone']}" if lead["phone"] else "") + (f" · {lead['email']}" if lead["email"] else ""))
         st.markdown(f"**{TIER_BADGE.get(lead['heat_tier'], lead['heat_tier'])} · heat {lead['heat_score']:.0f}/100**"
                     + (f"  \n<small>{lead['heat_reasons']}</small>" if lead["heat_reasons"] else ""), unsafe_allow_html=True)
-        st.caption(f"Category: {lead['category'] or 'n/a'} · Stage: {summary['stage'].replace('_', ' ')} · "
+        st.caption(f"Category: {lead['category'] or 'n/a'} · Stage: {ins['stage']} · "
                    f"NPC attempts: {lead['npc_count']} · Last outcome: {OUTCOMES.get(lead['last_outcome'] or '', {}).get('label', 'not called yet')}")
+        facts = [("Registered", f"{ins['registered_on']} ({ins['days_since_registration']} d ago)" if ins["registered_on"] else ""),
+                 ("Deposit", ins["deposit_status"] + (f", first on {ins['first_deposit_date']}" if ins["first_deposit_date"] else "")),
+                 ("Last trade", f"{ins['last_trade_date']} ({ins['days_since_last_trade']} d ago)" if ins["last_trade_date"] else ""),
+                 ("Holdings", f"₹{ins['holdings']:,}" if ins["holdings"] else ""), ("Account", ins["account_status"]),
+                 ("Best time to call", ins["best_time"]), ("Momentum", ins["momentum"]), ("Research segments", ins["segments"])]
+        st.markdown("  \n".join(f"**{k}:** {v}" for k, v in facts if v))
+        if ins["core_detail"]:
+            st.markdown(f"**Core activity:** {ins['core_detail']}")
+        if ins["non_core_detail"]:
+            st.caption(f"Non-core: {ins['non_core_detail']}")
         st.markdown(f"**App activity (30 days):** {summary['events_30d']} events · last seen {humanize_ago(ctx, summary['last_seen'])}")
         if summary["recent"]:
             st.dataframe(pd.DataFrame([{"event": e["event"], "times": e.get("count", 1), "when": fmt(e["time"])} for e in summary["recent"]]),
@@ -143,7 +158,13 @@ def lead_panel(lead: dict, agent_id: str, key: str) -> None:
             for h in history:
                 st.caption(f"{fmt(h['called_at'])} · {OUTCOMES[h['outcome']]['label']} · {h['notes'] or ''}")
     with right:
-        tab_rule, tab_ai = st.tabs(["Pitch", "AI pitch"])
+        tab_call, tab_rule, tab_ai = st.tabs(["Call plan", "Playbook", "AI pitch"])
+        with tab_call:
+            st.markdown(f"**Opener:** {ins['opener']}")
+            if ins["levers"]:
+                st.markdown("**Engagement levers**  \n" + ins["levers"].replace("\n", "  \n"))
+            st.markdown("**Pitch ideas**  \n" + ins["ideas"].replace("\n", "  \n"))
+            st.markdown(f"**Next best action:** {ins['next_action']}  \n**Objection to expect:** {ins['objection']}")
         with tab_rule:
             st.markdown(format_pitch(rule_pitch(ctx, lead, summary)))
         with tab_ai:
@@ -350,6 +371,21 @@ def leads_page() -> None:
 
 
 def reports_page() -> None:
+    st.subheader("Follow-up outcomes (Excel)")
+    c1, c2 = st.columns(2)
+    start = c1.date_input("From", ctx.today() - timedelta(days=6), key="xl_from")
+    end = c2.date_input("To", ctx.today(), key="xl_to")
+    if st.button("Build Excel report"):
+        import io
+
+        buf = io.BytesIO()
+        build_workbook(ctx, start, end, os.environ.get("WEP_DEMO_LABEL", "")).save(buf)
+        st.download_button("Download follow-up outcomes (.xlsx)", buf.getvalue(), type="primary",
+                           file_name=f"followup_outcomes_{start:%Y%m%d}_{end:%Y%m%d}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.caption("Success = called on time; fail = missed (escalated) or still overdue. Summary, by GM, by type, by priority, "
+               "by category, a daily trend chart, and every follow-up and call as rows.")
+    st.divider()
     day = st.date_input("Day", ctx.today())
     subject, body = eod_report(ctx, day, me)
     st.subheader(subject)

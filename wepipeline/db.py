@@ -235,6 +235,12 @@ def database_url(cfg: dict) -> str:
 
 def open_ctx(config_path=None, cfg: dict | None = None) -> Ctx:
     ctx = Ctx(cfg or load_config(config_path))
+    if os.environ.get("WEP_DATABASE"):  # demo dashboard: point at a separate SQLite file
+        ctx.cfg["database"], ctx.cfg["database_url"] = os.environ["WEP_DATABASE"], ""
+    if os.environ.get("WEP_NOW"):  # demo dashboard: frozen clock
+        from datetime import datetime
+
+        ctx._now = datetime.fromisoformat(os.environ["WEP_NOW"]).replace(tzinfo=ctx.tz)
     url = database_url(ctx.cfg)
     if url:
         ctx.conn = connect_postgres(url)

@@ -89,6 +89,18 @@ def tick(ctx: Ctx) -> dict:
             log.exception("Client DB pull failed")
             result["client_db"] = {"error": str(e)}
     result["sync"] = sync(ctx)
+    # Refresh the customer priority sheet / CSV (hourly by default).
+    every = int(ctx.cfg.get("outputs", {}).get("export_every_minutes", 60))
+    slot = now.replace(minute=(now.minute // every) * every if every < 60 else 0).strftime("%Y-%m-%dT%H:%M")
+    if ctx.cfg.get("outputs") and not _ran(ctx, "export", slot):
+        from .sheet_export import export
+
+        try:
+            result["export"] = export(ctx)
+            _mark(ctx, "export", slot)
+        except Exception as e:
+            log.exception("Customer list export failed")
+            result["export"] = {"error": str(e)}
     if ctx.is_working_day(today):
         if now >= ctx.day_start(today) and not _ran(ctx, "morning_note", today):
             result["morning_notes"] = send_morning_notes(ctx, today)

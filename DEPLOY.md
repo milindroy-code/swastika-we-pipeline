@@ -6,6 +6,7 @@
 | Database (leads, calls, follow-ups, alerts) | Neon Postgres | Free: 0.5 GB, about 100× what this needs |
 | Scheduler: sync, heat score, assignment, warnings and escalations, morning and EOD notes | GitHub Actions, every 15 min, 09:30–19:15 IST, Mon–Fri | Free: about 900 of the 2,000 free minutes a month |
 | Pull of new no-deposit clients from the back-office SQL Server | An always-on office PC (Task Scheduler, hourly) | Free |
+| Live Google Sheet: every customer with score, levers and pitch | Google Sheets, written by the scheduler hourly | Free |
 
 The SQL Server is inside the office network, so the cloud can't reach it. The office PC pulls from it and writes into the
 same Neon database the dashboard reads.
@@ -101,6 +102,37 @@ You need from IT: the **SQL Server name or IP**, and either a **Windows account*
 
    Output goes to `data\pull_clients.log`.
 4. The office firewall must allow outbound connections to Neon on port **5432**. If the test in step 2 says it can't connect, ask IT.
+
+## 6. Live Google Sheet of all customers, about 10 min
+
+The scheduler rewrites three tabs every hour:
+- **Customers**: one row per customer. Rank, 🔥/🌤️/❄️ priority, heat score, registration date and age bucket,
+  core and non-core activity (type, number of times, recency), momentum, best time to call, research segments,
+  engagement levers, conversation opener, pitch ideas, next best action, objection to expect, GM/SM, next follow-up and call history.
+- **Summary**: counts by category and priority, and per GM.
+- **How scoring works**: the formula and the current settings.
+
+Google needs a "service account", a robot Google account that is allowed to edit this one sheet:
+
+1. Go to **https://console.cloud.google.com**, create a project (for example `growth-sheet`), then open
+   **APIs & Services → Library**, search for **Google Sheets API**, and click **Enable**.
+2. **APIs & Services → Credentials → Create credentials → Service account**. Name it `sheet-writer` and click **Done**
+   (skip the optional role steps). Open it, go to **Keys → Add key → Create new key → JSON**, and a `.json` file downloads.
+   Treat that file like a password.
+3. Create a Google Sheet (for example "Growth – Customer Priority List"). Click **Share**, paste the service account's
+   email (it looks like `sheet-writer@growth-sheet.iam.gserviceaccount.com`), choose **Editor**, and untick "Notify".
+   Share it with the SMs as **Viewer** too.
+4. Copy the sheet's id from its URL: `docs.google.com/spreadsheets/d/`**`<THIS PART>`**`/edit`.
+5. Add two **GitHub repository secrets** (Settings → Secrets and variables → Actions):
+   - `GOOGLE_SERVICE_ACCOUNT_JSON`: open the downloaded `.json` file in Notepad and paste its entire contents
+   - `GOOGLE_SHEET_KEY`: the id from step 4
+6. Run **Actions → Follow-up scheduler → Run workflow**. The sheet fills within a minute, then refreshes hourly.
+
+To test from this laptop first, save the key as `secrets/service_account.json` (git ignores this folder). Set
+`outputs.google_sheet.enabled: true` and `spreadsheet_key` in `config.yaml`, then run `python run.py export-sheet`.
+
+Rows are rewritten on every run, so notes typed into the Customers tab are lost. Keep your own notes in a separate
+tab or sheet (a `VLOOKUP` on the Client code column pulls in the latest data).
 
 ## Day-to-day
 

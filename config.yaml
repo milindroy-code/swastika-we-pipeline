@@ -185,6 +185,24 @@ notifications:
     from_address: ""
   webhook_url: ""               # optional Slack / Google Chat incoming webhook for alerts
 
+# Prioritised customer list with scores, levers and pitch, published on a schedule.
+outputs:
+  csv_path: data/exports/customer_priority.csv   # always written (local runs)
+  export_every_minutes: 60                        # how often the scheduler refreshes the sheet
+  google_sheet:
+    enabled: false               # true once the sheet is shared with the service account (see DEPLOY.md, step 6)
+    spreadsheet_key: ""          # the long id in the sheet URL: docs.google.com/spreadsheets/d/<THIS>/edit
+    customers_tab: Customers
+    service_account_json: secrets/service_account.json   # local key file; in the cloud use GOOGLE_SERVICE_ACCOUNT_JSON
+
+# Friendlier names for WebEngage events in the sheet and pitches (anything unlisted is tidied automatically).
+activity_labels:
+  ORDER_PLACED_MOB: Placed an order
+  CALL_ACCEPTED_MOB: Accepted a research call
+  RECOMMENDATION_LISTING_OPENED_MOB: Opened research
+  RECOMMENDATION_LANDING_SCREEN_MOB: Visited research home
+  DASHBOARD_OPENED_MOB: Opened the app dashboard
+
 market_notes_file: data/market_notes.md
 
 ai_pitch:

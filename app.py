@@ -18,6 +18,7 @@ from wepipeline.followups import KIND_LABELS, OUTCOMES, log_call, queue_for, rea
 from wepipeline.ingest import sync_webengage
 from wepipeline.admin import RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, current_sla, save_rules
 from wepipeline.db import set_setting
+from wepipeline.sheet_export import COLUMNS, build_rows, export
 from wepipeline.pitch import ai_pitch, format_pitch, market_notes_text, rule_pitch
 from wepipeline.reports import classify, compliance, eod_report, misses
 
@@ -63,7 +64,7 @@ me_id = st.sidebar.selectbox("You are", list(labels), format_func=labels.get)
 me = ctx.member(me_id)
 is_manager = ctx.is_sm(me)
 
-pages = (["Team compliance", "Escalations", "Leads", "GM view", "Reports", "Data & admin", "Admin: rules", "Notifications"]
+pages = (["Team compliance", "Customer list", "Escalations", "Leads", "GM view", "Reports", "Data & admin", "Admin: rules", "Notifications"]
          if is_manager else ["My day", "My leads", "Notifications"])
 page = st.sidebar.radio("Page", pages)
 
@@ -380,6 +381,40 @@ def admin_page() -> None:
         st.toast("Saved.")
 
 
+@st.cache_data(ttl=300, show_spinner="Building the customer list…")
+def _customer_rows(_ctx_id: int) -> list[dict]:
+    return build_rows(ctx)
+
+
+def customer_list_page() -> None:
+    st.caption("Every customer with priority, activity, levers and pitch. The same list is published to the Google Sheet "
+               "when one is configured. It refreshes every 5 minutes here.")
+    data = _customer_rows(id(ctx))
+    df = pd.DataFrame([{h: r.get(k, "") for h, k in COLUMNS} for r in data])
+    for col in ("Rank", "Days since registration"):  # blank for closed leads / clients without a registration date
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    c1, c2, c3, c4 = st.columns(4)
+    pr = c1.multiselect("Priority", ["🔥 Hot", "🌤️ Warm", "❄️ Cold"])
+    cat = c2.multiselect("Category", sorted(df["Category"].unique()))
+    gm = c3.multiselect("GM", sorted(df["GM"].unique()))
+    status = c4.multiselect("Lead status", sorted(df["Lead status"].unique()), default=["open"])
+    view = df
+    for col, sel in [("Priority", pr), ("Category", cat), ("GM", gm), ("Lead status", status)]:
+        view = view[view[col].isin(sel)] if sel else view
+    k = st.columns(4)
+    k[0].metric("Customers", len(view))
+    k[1].metric("🔥 Hot", int((view["Priority"] == "🔥 Hot").sum()))
+    k[2].metric("🌤️ Warm", int((view["Priority"] == "🌤️ Warm").sum()))
+    k[3].metric("Waiting for a GM", int((view["GM"] == "Waiting for capacity").sum()))
+    st.dataframe(view, hide_index=True, width="stretch", height=560)
+    st.download_button("Download as CSV (opens in Excel / Google Sheets)", view.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"customer_priority_{ctx.today().isoformat()}.csv")
+    if st.button("Publish to Google Sheet now"):
+        with st.spinner("Publishing…"):
+            res = export(ctx)
+        st.write(res.get("google_sheet") or "Google Sheet not configured yet (see DEPLOY.md, step 6). CSV written.")
+
+
 def time_limits_md() -> str:
     r, sla = ctx.rules, current_sla(ctx)
     return (
@@ -456,6 +491,8 @@ elif page == "Team compliance":
     team_compliance()
 elif page == "Escalations":
     escalations()
+elif page == "Customer list":
+    customer_list_page()
 elif page == "Leads":
     leads_page()
 elif page == "GM view":

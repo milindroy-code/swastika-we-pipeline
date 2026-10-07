@@ -76,6 +76,15 @@ All weights, tiers and SLAs live under `heat:` in `config.yaml`. The scale of 35
 Core activities are currently `ORDER_PLACED_MOB`, `CALL_ACCEPTED_MOB` and `RECOMMENDATION_LISTING_OPENED_MOB`.
 `DASHBOARD_OPENED_MOB` and `RECOMMENDATION_LANDING_SCREEN_MOB` are non-core. Adjust `heat.core_activities` to change this.
 
+## Customer priority list (Google Sheet / CSV)
+
+`python run.py export-sheet` (and the scheduler, hourly) publishes every customer with their rank, priority and score,
+registration date and bucket, and core and non-core activity (type × times × recency). It also adds momentum, best time
+to call, research segments, **engagement levers**, a **conversation opener**, **pitch ideas**, the next best action, the
+likely objection, the GM/SM owner and follow-up status. It always writes `data/exports/customer_priority.csv`, and writes
+the Google Sheet once one is set up (DEPLOY.md, step 6). SMs can also filter and download it on the dashboard's
+**Customer list** page.
+
 ## Follow-up rules and time limits
 
 Every follow-up has a due time and a deadline. The admin sets the numbers on **Admin: rules** (PIN in `ADMIN_PIN`).

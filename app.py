@@ -317,7 +317,10 @@ def team_compliance() -> None:
 
     st.subheader(f"Missed follow-ups on {day:%d %b}")
     m = misses(ctx, day, team_of=me_id if scope == "My team" else None)
-    st.dataframe(pd.DataFrame(m).rename(columns=COLUMN_LABELS), hide_index=True, width="stretch") if m else st.caption("No misses.")
+    if m:
+        st.dataframe(pd.DataFrame(m).rename(columns=COLUMN_LABELS), hide_index=True, width="stretch")
+    else:
+        st.caption("No misses.")
 
 
 def escalations() -> None:

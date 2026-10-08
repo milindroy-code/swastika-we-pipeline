@@ -867,18 +867,27 @@ def sarthi_track_view(editable: bool) -> None:
     """Sarthi's track record as GMs will quote it. Only the admin can change it (official, complete data)."""
     t = sarthi.track(ctx)
     st.subheader("Sarthi track record (quoted to customers)")
-    st.caption("Enter the complete record for the period from official Sarthi data: every closed idea, targets AND "
-               "stop-losses. Never a hand-picked list of wins. Have compliance approve the wording before go-live.")
+    st.caption("Every closed Sarthi idea for the period, profits AND losses, pulled from the research database "
+               "(tblScripOrder) every hour from the office PC. Never a hand-picked list of wins. "
+               "Have compliance approve the wording before go-live.")
     if t.get("updated"):
         st.caption(f"Last updated {fmt(t['updated'])} · source: {t.get('source') or 'not given'}")
     preview = [x for x in [sarthi.track_line(ctx, s) for s in sarthi.SEGMENTS] if x]
     if not editable:
         st.markdown("\n".join(f"- {x}" for x in preview) or "_Not entered yet: pitches explain Sarthi without numbers._")
         return
+    if st.button("🔄 Pull the latest numbers from the research database"):
+        try:
+            with st.spinner("Reading every closed Sarthi idea…"):
+                sarthi.pull_track(ctx)
+            _customer_rows.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Research database not reachable from here ({type(e).__name__}). Use the office network, or enter the numbers below.")
     period = st.text_input("Period", t["period"], key="sarthi_period")
     table = pd.DataFrame([{"Segment": s, "Ideas closed": t["segments"].get(s, {}).get("closed", 0),
-                           "Hit target": t["segments"].get(s, {}).get("target", 0),
-                           "Hit stop-loss": t["segments"].get(s, {}).get("stoploss", 0)} for s in sarthi.SEGMENTS])
+                           "Ended in profit": t["segments"].get(s, {}).get("profit", 0),
+                           "Ended in loss": t["segments"].get(s, {}).get("loss", 0)} for s in sarthi.SEGMENTS])
     edited = st.data_editor(table, hide_index=True, disabled=["Segment"], key="sarthi_table", width="stretch")
     highlights = st.text_area("Approved examples (optional, one per line; start with 'F&O:', 'Equity:' or 'Commodity:' to target a segment)",
                               "\n".join(t["highlights"]), height=90, key="sarthi_highlights")
@@ -890,8 +899,8 @@ def sarthi_track_view(editable: bool) -> None:
             st.error("Say where the numbers come from.")
             return
         try:
-            sarthi.save_track(ctx, period, {r["Segment"]: {"closed": r["Ideas closed"], "target": r["Hit target"],
-                                                           "stoploss": r["Hit stop-loss"]} for r in edited.to_dict("records")},
+            sarthi.save_track(ctx, period, {r["Segment"]: {"closed": r["Ideas closed"], "profit": r["Ended in profit"],
+                                                           "loss": r["Ended in loss"]} for r in edited.to_dict("records")},
                               highlights.split("\n"), source, disclaimer)
             _customer_rows.clear()
             st.toast("Saved. Pitches use it from now on.")

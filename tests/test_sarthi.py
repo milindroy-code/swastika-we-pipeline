@@ -37,12 +37,12 @@ def add_lead(ctx, lid, extra, events=()):
 
 def test_track_record_is_complete_and_validated(ctx):
     with pytest.raises(ValueError):  # wins + losses can't exceed calls closed
-        sarthi.save_track(ctx, "last 30 days", {"F&O": {"closed": 10, "target": 8, "stoploss": 4}}, [], "", "")
-    sarthi.save_track(ctx, "last 30 days", {"F&O": {"closed": 20, "target": 14, "stoploss": 6},
-                                            "Equity": {"closed": 10, "target": 6, "stoploss": 4}},
+        sarthi.save_track(ctx, "last 30 days", {"F&O": {"closed": 10, "profit": 8, "loss": 4}}, [], "", "")
+    sarthi.save_track(ctx, "last 30 days", {"F&O": {"closed": 20, "profit": 14, "loss": 6},
+                                            "Equity": {"closed": 10, "profit": 6, "loss": 4}},
                       ["F&O: Bank Nifty idea of 6 Oct closed at target", "General highlight"], "Research desk", "")
-    assert sarthi.track_line(ctx, "F&O") == "Sarthi F&O, last 30 days: 14 of 20 closed ideas hit target, 6 hit stop-loss"
-    assert sarthi.track_line(ctx, None) == "Sarthi, last 30 days: 20 of 30 closed ideas hit target, 10 hit stop-loss"
+    assert sarthi.track_line(ctx, "F&O") == "Sarthi F&O, last 30 days: 14 of 20 closed ideas ended in profit, 6 in loss"
+    assert sarthi.track_line(ctx, None) == "Sarthi, last 30 days: 20 of 30 closed ideas ended in profit, 10 in loss"
     assert sarthi.highlight_for(ctx, "F&O") == "Bank Nifty idea of 6 Oct closed at target"
     assert sarthi.highlight_for(ctx, "Commodity") == "General highlight"
     assert "does not guarantee" in sarthi.track(ctx)["disclaimer"]
@@ -51,19 +51,19 @@ def test_track_record_is_complete_and_validated(ctx):
 def test_no_track_record_means_no_numbers(ctx):
     lead = add_lead(ctx, "N1", {"stage": "kyc_no_deposit", "registration_date": (NOW - timedelta(days=1)).isoformat()})
     ins = customer_insight(ctx, lead)
-    assert "closed ideas hit target" not in ins["ideas"]
+    assert "closed ideas ended in profit" not in ins["ideas"]
     assert ins["ideas"].startswith("• Sarthi explained simply")
 
 
 def test_unfunded_research_user_gets_sarthi_and_margin_pitch(ctx):
-    sarthi.save_track(ctx, "last 30 days", {"F&O": {"closed": 20, "target": 14, "stoploss": 6}}, [], "Research desk", "")
+    sarthi.save_track(ctx, "last 30 days", {"F&O": {"closed": 20, "profit": 14, "loss": 6}}, [], "Research desk", "")
     ctx.cfg["sarthi"]["starter_amount"] = {"F&O": 25000}
     lead = add_lead(ctx, "U1", {"stage": "kyc_no_deposit", "sarthi_active": False, "preferred_segment": "FNO"},
                     [("CALL_ACCEPTED_MOB", 4), ("RECOMMENDATION_LISTING_OPENED_MOB · fando_research", 6)])
     ins = customer_insight(ctx, lead)
     assert ins["opener"].startswith("I saw you've been following Sarthi's F&O trade ideas")
     ideas = ins["ideas"].split("\n")
-    assert ideas[0] == "• Sarthi F&O, last 30 days: 14 of 20 closed ideas hit target, 6 hit stop-loss. Say it as it is, then: past results don't guarantee future ones"
+    assert ideas[0] == "• Sarthi F&O, last 30 days: 14 of 20 closed ideas ended in profit, 6 in loss. Say it as it is, then: past results don't guarantee future ones"
     assert ideas[1].startswith("• Activate Sarthi for F&O with them now: it's needed to receive the ideas")
     assert ins["opener"].endswith("The first step is switching on Sarthi so its ideas start reaching you.")
     assert any("add funds now (₹25,000)" in i for i in ideas)
@@ -82,7 +82,7 @@ def test_dormant_and_funded_openers_lead_with_sarthi(ctx):
 
 
 def test_pitches_never_promise_earnings(ctx):
-    sarthi.save_track(ctx, "last 30 days", {"Equity": {"closed": 10, "target": 6, "stoploss": 4}}, [], "", "")
+    sarthi.save_track(ctx, "last 30 days", {"Equity": {"closed": 10, "profit": 6, "loss": 4}}, [], "", "")
     for i, extra in enumerate([{"stage": s} for s in ("kyc_pending", "kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader")]):
         ins = customer_insight(ctx, add_lead(ctx, f"P{i}", extra, [("ORDER_PLACED_MOB", 2), ("CALL_ACCEPTED_MOB", 1)]))
         text = " ".join([ins["opener"], ins["ideas"], ins["objection"], ins["next_action"], ins["levers"]])
@@ -128,3 +128,39 @@ def test_unknown_status_asks_to_check_and_logged_activation_sticks(ctx):
     # the client database replica still says "off": the GM's activation is kept
     enrich_leads(ctx, pd.DataFrame([{"CLIENT_ID": "S1", "REGISTRATION_DATE": NOW.replace(tzinfo=None), "IsSarthiTIOn": 0}]))
     assert customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='S1'"))["sarthi_status"] == "active"
+
+
+def test_preferred_segment_lists():
+    assert sarthi.segment_from_preference("Intraday,Delivery,FNO") == "F&O"
+    assert sarthi.segment_from_preference("Delivery,Intraday,FNO,Commodity") == "F&O"
+    assert sarthi.segment_from_preference("Commodity") == "Commodity"
+    assert sarthi.segment_from_preference("Intraday,Delivery") == "Equity"
+    assert sarthi.segment_from_preference("Segment Disabled") is None
+    assert sarthi.segment_from_preference(None) is None
+
+
+def test_pull_track_from_research_db(ctx, monkeypatch):
+    import pandas as pd
+    import wepipeline.clientdb as clientdb
+
+    seen = {}
+
+    def fake_query(c, sql):
+        seen["sql"] = sql
+        return pd.DataFrame([{"Segment": "Commodity", "closed": 159, "profit": 103, "loss": 56, "target_hit": 16, "stoploss_hit": 32},
+                             {"Segment": "F&O", "closed": 44, "profit": 26, "loss": 18, "target_hit": 7, "stoploss_hit": 11}])
+    monkeypatch.setattr(clientdb, "_query", fake_query)
+    sarthi.save_track(ctx, "x", {}, ["F&O: approved example"], "manual", "Custom disclaimer")
+    sarthi.pull_track(ctx)
+    assert "tblScripOrder" in seen["sql"] and "Avoid call is not executed" in seen["sql"] and "DAY, -30" in seen["sql"]
+    assert sarthi.track_line(ctx, "Commodity") == "Sarthi Commodity, last 30 days: 103 of 159 closed ideas ended in profit, 56 in loss"
+    t = sarthi.track(ctx)
+    assert t["highlights"] == ["F&O: approved example"] and t["disclaimer"] == "Custom disclaimer"  # admin's text kept
+    assert t["source"].endswith("(auto)")
+
+
+def test_blank_sarthi_flag_in_client_db_means_not_activated(ctx):
+    from wepipeline.clientdb import classify
+    info = classify(ctx, {"CLIENT_ID": "X", "REGISTRATION_DATE": NOW.replace(tzinfo=None), "IsSarthiTIOn": None})
+    assert info["extra"]["sarthi_active"] is False
+    assert classify(ctx, {"CLIENT_ID": "Y", "IsSarthiTIOn": True})["extra"]["sarthi_active"] is True

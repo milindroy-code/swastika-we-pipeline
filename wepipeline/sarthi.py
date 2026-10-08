@@ -1,7 +1,7 @@
 """Sarthi, the hero feature in every pitch: ready trade ideas (entry, target, stop-loss) in equity, F&O and commodities.
 
-The track record shown to customers comes only from what the admin enters on the Admin page (official Sarthi data,
-complete for the period: targets AND stop-losses). Nothing is invented here. Every use carries the disclaimer, and
+The track record comes from the research database (every closed Sarthi idea in [ReplResearchPanelDB].[dbo].[tblScripOrder]:
+profits AND losses, early exits and stop-losses included) or, failing that, from what the admin enters. Nothing is invented. Every use carries the disclaimer, and
 pitch text never promises earnings.
 """
 from __future__ import annotations
@@ -14,8 +14,9 @@ from .db import get_setting, set_setting
 SEGMENTS = ["Equity", "F&O", "Commodity"]
 DEFAULT_DISCLAIMER = ("Past performance of Sarthi ideas does not guarantee future results. Trading involves risk; "
                       "the customer decides which ideas to take.")
-PREFERRED_SEGMENT = {"eq": "Equity", "equity": "Equity", "cash": "Equity", "fno": "F&O", "f&o": "F&O", "fo": "F&O",
-                     "derivative": "F&O", "derivatives": "F&O", "commodity": "Commodity", "mcx": "Commodity", "comm": "Commodity"}
+PREFERRED_SEGMENT = {"eq": "Equity", "equity": "Equity", "cash": "Equity", "delivery": "Equity", "intraday": "Equity",
+                     "fno": "F&O", "f&o": "F&O", "fo": "F&O", "derivative": "F&O", "derivatives": "F&O",
+                     "commodity": "Commodity", "mcx": "Commodity", "comm": "Commodity"}
 
 
 def name(ctx: Ctx) -> str:
@@ -23,8 +24,10 @@ def name(ctx: Ctx) -> str:
 
 
 def segment_from_preference(value) -> str | None:
-    v = str(value or "").strip().lower()
-    return next((seg for key, seg in PREFERRED_SEGMENT.items() if key == v or key in v.split()), None) if v else None
+    """'Intraday,Delivery,FNO' -> 'F&O' (the most specialised segment they enabled); 'Delivery' -> 'Equity'."""
+    tokens = [t.strip().lower() for t in str(value or "").replace("/", ",").split(",") if t.strip()]
+    found = {PREFERRED_SEGMENT[t] for t in tokens if t in PREFERRED_SEGMENT}
+    return next((s for s in ("F&O", "Commodity", "Equity") if s in found), None)
 
 
 def track(ctx: Ctx) -> dict:
@@ -38,16 +41,17 @@ def track(ctx: Ctx) -> dict:
 
 
 def save_track(ctx: Ctx, period: str, segments: dict[str, dict], highlights: list[str], source: str, disclaimer: str) -> dict:
-    """Validate and store the official track record. Raises ValueError on inconsistent numbers."""
+    """Validate and store the track record (closed ideas, ended in profit, ended in loss). Raises ValueError on bad numbers."""
     clean = {}
     for seg, v in segments.items():
-        closed, target, stop = (int(v.get(k) or 0) for k in ("closed", "target", "stoploss"))
-        if closed < 0 or target < 0 or stop < 0:
+        closed, profit, loss = (int(v.get(k) or 0) for k in ("closed", "profit", "loss"))
+        if min(closed, profit, loss) < 0:
             raise ValueError(f"{seg}: numbers can't be negative")
-        if target + stop > closed:
-            raise ValueError(f"{seg}: target hits + stop-loss hits ({target + stop}) can't exceed calls closed ({closed})")
+        if profit + loss > closed:
+            raise ValueError(f"{seg}: ideas in profit + in loss ({profit + loss}) can't exceed ideas closed ({closed})")
         if closed:
-            clean[seg] = {"closed": closed, "target": target, "stoploss": stop}
+            clean[seg] = {"closed": closed, "profit": profit, "loss": loss,
+                          **{k: int(v[k]) for k in ("target_hit", "stoploss_hit") if v.get(k) is not None}}
     data = {"period": period.strip() or "last 30 days", "segments": clean,
             "highlights": [h.strip() for h in highlights if h.strip()], "source": source.strip(),
             "disclaimer": disclaimer.strip() or DEFAULT_DISCLAIMER, "updated": iso(ctx.now())}
@@ -56,19 +60,19 @@ def save_track(ctx: Ctx, period: str, segments: dict[str, dict], highlights: lis
 
 
 def track_line(ctx: Ctx, segment: str | None) -> str | None:
-    """'Sarthi F&O, last 30 days: 14 of 20 closed ideas hit target, 6 hit stop-loss' (complete record, never cherry-picked)."""
+    """'Sarthi F&O, last 30 days: 41 of 60 closed ideas ended in profit, 19 in loss' (every closed idea, never cherry-picked)."""
     t = track(ctx)
-    segs = t["segments"]
+    segs = {k: v for k, v in t["segments"].items() if "profit" in v}
     if segment in segs:
         s, label = segs[segment], f"{name(ctx)} {segment}"
     elif segs:
-        s = {k: sum(v[k] for v in segs.values()) for k in ("closed", "target", "stoploss")}
+        s = {k: sum(v[k] for v in segs.values()) for k in ("closed", "profit", "loss")}
         label = name(ctx)
     else:
         return None
-    line = f"{label}, {t['period']}: {s['target']} of {s['closed']} closed ideas hit target"
-    if s["stoploss"]:
-        line += f", {s['stoploss']} hit stop-loss"
+    line = f"{label}, {t['period']}: {s['profit']} of {s['closed']} closed ideas ended in profit"
+    if s["loss"]:
+        line += f", {s['loss']} in loss"
     return line
 
 
@@ -86,3 +90,39 @@ def starter_amount(ctx: Ctx, segment: str | None) -> str:
     amounts = (ctx.cfg.get("sarthi") or {}).get("starter_amount") or {}
     amt = amounts.get(segment) or amounts.get("default")
     return f"₹{int(amt):,}" if amt else "an amount they're comfortable with"
+
+
+# ---------------------------------------------------------------- official numbers from the research database
+TRACK_SQL = """
+SELECT
+    CASE WHEN InstrumentName = 'COMMODITY' THEN 'Commodity'
+         WHEN SegmentName IN ('OPTIONS', 'FUTURES') THEN 'F&O'
+         ELSE 'Equity' END AS Segment,
+    COUNT(*) AS closed,
+    SUM(CASE WHEN CalculatedReturn > 0 THEN 1 ELSE 0 END) AS profit,
+    SUM(CASE WHEN CalculatedReturn < 0 THEN 1 ELSE 0 END) AS loss,
+    SUM(CASE WHEN Message LIKE 'Profit Target hit%' THEN 1 ELSE 0 END) AS target_hit,
+    SUM(CASE WHEN Message LIKE 'Stop loss hit%' THEN 1 ELSE 0 END) AS stoploss_hit
+FROM [ReplResearchPanelDB].[dbo].[tblScripOrder]
+WHERE MessageType = 'Recommendation' AND IsDeleted = 0 AND Status = 'End'
+  AND CalculatedReturn IS NOT NULL
+  AND (Message IS NULL OR Message NOT LIKE 'Avoid call is not executed%')
+  AND CreatedOn >= DATEADD(DAY, -{days}, CAST(GETDATE() AS DATE))
+GROUP BY CASE WHEN InstrumentName = 'COMMODITY' THEN 'Commodity'
+              WHEN SegmentName IN ('OPTIONS', 'FUTURES') THEN 'F&O' ELSE 'Equity' END
+"""
+
+
+def pull_track(ctx: Ctx, days: int | None = None) -> dict:
+    """Recompute the track record from every closed Sarthi idea in the research database (read-only).
+    Keeps the admin's approved examples and disclaimer."""
+    from .clientdb import _query
+
+    days = int(days or (ctx.cfg.get("sarthi") or {}).get("track_days", 30))
+    df = _query(ctx, (ctx.cfg.get("sarthi") or {}).get("track_query") or TRACK_SQL.format(days=days))
+    segments = {r["Segment"]: {k: int(r[k] or 0) for k in ("closed", "profit", "loss", "target_hit", "stoploss_hit")}
+                for r in df.to_dict("records")}
+    old = track(ctx)
+    return save_track(ctx, f"last {days} days", segments, old["highlights"],
+                      f"[ReplResearchPanelDB].[dbo].[tblScripOrder]: every closed recommendation, last {days} days (auto)",
+                      old["disclaimer"])

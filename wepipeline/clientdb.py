@@ -245,8 +245,8 @@ def classify(ctx: Ctx, rec: dict) -> dict:
             "first_deposit": _num(rec.get("FirstDeposit")) or None, "first_deposit_date": iso(fdd),
             "first_trade_date": iso(ftd), "last_trade_date": iso(ltd), "days_since_last_trade": ltd_days,
             "holdings": _num(rec.get("Holdings")) or None, "account_status": rec.get("AccountStatus") or "",
-            "sarthi_active": (None if rec.get("IsSarthiTIOn") is None or str(rec.get("IsSarthiTIOn")) in {"", "nan", "None"}
-                              else str(rec.get("IsSarthiTIOn")).strip().lower() in {"1", "true", "y", "yes"}),
+            # client found: a blank flag means Sarthi was never switched on
+            "sarthi_active": str(rec.get("IsSarthiTIOn")).strip().lower() in {"1", "true", "y", "yes"},
             "sarthi_activated_on": iso(parse_dt(rec.get("SarthiActivationDate"), ctx.tz)),
             "preferred_segment": str(rec.get("PreferredSegment") or "").strip(),
         },
@@ -307,5 +307,13 @@ def enrich_leads(ctx: Ctx, lookup: pd.DataFrame | None = None) -> dict:
 
 
 def refresh_from_client_db(ctx: Ctx) -> dict:
-    """Pull new no-deposit clients, then age every lead from the client database."""
-    return {"new_clients": sync_new_clients(ctx), "ageing": enrich_leads(ctx)}
+    """Pull new no-deposit clients, age every lead, and refresh Sarthi's track record from the research database."""
+    from .sarthi import pull_track
+
+    result = {"new_clients": sync_new_clients(ctx), "ageing": enrich_leads(ctx)}
+    try:
+        result["sarthi_track"] = {k: v for k, v in pull_track(ctx).items() if k in ("period", "segments")}
+    except Exception as e:  # research database unavailable: keep the last good record
+        log.warning("Sarthi track record not refreshed: %s", e)
+        result["sarthi_track"] = {"error": str(e)}
+    return result

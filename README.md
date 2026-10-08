@@ -83,9 +83,12 @@ It is matched to the customer's segment (from app activity or `PreferredSegment`
 `IsSarthiTIOn`. The goal of the call is funds in the account: "add funds now so you're ready for Sarthi's next idea",
 using `sarthi.starter_amount` when set.
 
-Sarthi's **track record** is quoted only from what the admin enters on **Admin: rules**: the complete record for the
-period (ideas closed, targets hit, stop-losses hit), a required source, optional approved examples and the disclaimer
-GMs must say. Nothing is quoted until it is entered. Pitches never use "earn", "assured" or "sure-shot" wording, and a
+Sarthi's **track record** is computed from every closed recommendation in `[ReplResearchPanelDB].[dbo].[tblScripOrder]`
+over the last 30 days (`python run.py sarthi`, and hourly with the client pull). It counts profits AND losses, early exits
+and stop-losses, and leaves out ideas still open or never executed. The line reads, e.g., "Sarthi Equity, last 30 days:
+59 of 83 closed ideas ended in profit, 24 in loss", followed by the disclaimer. On **Admin: rules** the admin can pull it
+on demand, edit the approved examples and the disclaimer, or enter numbers by hand when the database is unreachable.
+Activation comes from `IsSarthiTIOn`; a blank value for a known client means never activated, so GMs ask for it. Pitches never use "earn", "assured" or "sure-shot" wording, and a
 test enforces it. Have compliance approve the wording before go-live.
 
 ## SMs: analyse an uploaded list

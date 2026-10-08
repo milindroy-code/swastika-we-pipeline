@@ -238,6 +238,7 @@ sarthi:
   # Suggested first deposit per segment for the "add funds" ask, e.g. { Equity: 5000, "F&O": 25000, Commodity: 10000, default: 5000 }.
   # Leave empty to say "an amount they're comfortable with".
   starter_amount: {}
+  track_days: 30                 # Sarthi's record is every closed idea in this many days (from tblScripOrder)
 
 market_notes_file: data/market_notes.md
 

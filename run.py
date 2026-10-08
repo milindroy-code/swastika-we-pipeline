@@ -6,6 +6,7 @@
     python run.py pull-clients  # no-deposit clients + ageing of every lead from the back-office SQL Server, then a full sync
     python run.py export-sheet  # publish the prioritised customer list (CSV + Google Sheet if configured)
     python run.py market      # refresh live market notes now (NSE, Yahoo, ET / Google News) with sanity checks
+    python run.py sarthi      # refresh Sarthi's track record from the research database
     python run.py loop        # run continuously (sync every few minutes, morning note and EOD on schedule)
 """
 from __future__ import annotations
@@ -20,7 +21,7 @@ from wepipeline.db import open_ctx
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Growth team follow-up pipeline")
-    parser.add_argument("command", choices=["sync", "morning", "eod", "tick", "loop", "pull-clients", "export-sheet", "market"])
+    parser.add_argument("command", choices=["sync", "morning", "eod", "tick", "loop", "pull-clients", "export-sheet", "market", "sarthi"])
     parser.add_argument("--config", help="path to config.yaml")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -33,6 +34,13 @@ def main() -> None:
         from wepipeline.clientdb import refresh_from_client_db
 
         print(json.dumps({"client_db": refresh_from_client_db(ctx), "sync": jobs.sync(ctx)}, indent=2, default=str))
+        return
+    if args.command == "sarthi":
+        from wepipeline.sarthi import SEGMENTS, pull_track, track_line
+
+        data = pull_track(ctx)
+        print(json.dumps({"period": data["period"], "segments": data["segments"],
+                          "lines": [x for x in (track_line(ctx, s) for s in SEGMENTS) if x]}, indent=2, ensure_ascii=False))
         return
     if args.command == "market":
         from wepipeline.market import live_notes, refresh

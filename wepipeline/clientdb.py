@@ -23,6 +23,46 @@ def _cfg(ctx: Ctx) -> dict:
     return ctx.cfg["sources"].get("client_db") or {}
 
 
+def _load_windows_user_env() -> None:
+    """On Windows, `setx` stores credentials in the user profile, but programs started earlier (like the
+    dashboard) don't see them. Read them from the profile when they're missing from the environment."""
+    if os.name != "nt" or os.environ.get("CLIENT_DB_USER"):
+        return
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            for name in ("CLIENT_DB_USER", "CLIENT_DB_PASSWORD", "CLIENT_DB_CONN"):
+                try:
+                    os.environ.setdefault(name, winreg.QueryValueEx(key, name)[0])
+                except FileNotFoundError:
+                    pass
+    except OSError:
+        pass
+
+
+def available(ctx: Ctx) -> bool:
+    """True when a client database is configured (it may still be unreachable from this machine)."""
+    _load_windows_user_env()
+    return bool(os.environ.get("CLIENT_DB_CONN") or (_cfg(ctx).get("enabled", True) and _cfg(ctx).get("server")))
+
+
+def reachable(ctx: Ctx, timeout: float = 3.0) -> bool:
+    """Quick network check (a few seconds) before an ODBC login that would otherwise hang for ~20 s per try."""
+    import socket
+
+    server = _cfg(ctx).get("server") or ""
+    if not server or os.environ.get("CLIENT_DB_CONN"):
+        return bool(os.environ.get("CLIENT_DB_CONN"))
+    host, _, port = server.replace("tcp:", "").partition(",")
+    host = host.split("\\")[0]  # named instance: HOST\INSTANCE
+    try:
+        with socket.create_connection((host, int(port or 1433)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def connection_string(ctx: Ctx) -> str:
     """CLIENT_DB_CONN overrides everything; otherwise built from config + optional SQL login env vars."""
     if os.environ.get("CLIENT_DB_CONN"):
@@ -34,6 +74,7 @@ def connection_string(ctx: Ctx) -> str:
              f"Database={c.get('database', 'Repl_TargetReview')}", "Encrypt=yes",
              f"TrustServerCertificate={'yes' if c.get('trust_server_certificate', True) else 'no'}",
              "ApplicationIntent=ReadOnly"]
+    _load_windows_user_env()
     user = os.environ.get("CLIENT_DB_USER")
     parts += [f"UID={user}", f"PWD={os.environ.get('CLIENT_DB_PASSWORD', '')}"] if user else ["Trusted_Connection=yes"]
     return ";".join(parts) + ";"
@@ -249,7 +290,7 @@ def enrich_leads(ctx: Ctx, lookup: pd.DataFrame | None = None) -> dict:
                        ON CONFLICT (user_id, activity) DO UPDATE SET last_at=excluded.last_at, source_file=excluded.source_file""",
                     (cid, REGISTERED, 1, iso(info["registration"]), "", "client_db"),
                 )
-        automated = lead["source"] == SOURCE or (lead["source"] or "").startswith("WebEngage activity")
+        automated = lead["source"] == SOURCE or (lead["source"] or "").startswith("WebEngage activity")  # uploads included
         ctx.conn.execute("UPDATE leads SET category=?, extra=?, updated_at=? WHERE lead_id=?",
                          (category if automated else lead["category"], json.dumps(extra), now, lead["lead_id"]))
         counts[category] = counts.get(category, 0) + 1

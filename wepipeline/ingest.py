@@ -201,13 +201,13 @@ def _file_category(ctx: Ctx, filename: str) -> str:
     return ctx.cfg.get("heat", {}).get("new_lead_category", "New user - app activity")
 
 
-def create_leads_from_users(ctx: Ctx, users: dict[str, dict], source_file: str) -> int:
+def create_leads_from_users(ctx: Ctx, users: dict[str, dict], source_file: str, category: str | None = None) -> int:
     """Add users seen in an activity file as new leads when they are not in the lead sheet yet."""
     heat = ctx.cfg.get("heat", {})
     if not heat.get("create_leads_from_activity", True):
         return 0
     now = iso(ctx.now())
-    default_category = _file_category(ctx, source_file)
+    default_category = category or _file_category(ctx, source_file)
     created = 0
     for uid, u in users.items():
         phone = norm_phone(u.get("phone"))
@@ -345,17 +345,19 @@ def _ingest_frame(ctx: Ctx, df: pd.DataFrame, sheet: str, path: Path) -> tuple[s
         kind = "profiles"
         for r in df.to_dict("records"):
             uid = str(r[user_col]).strip()
-            if not uid:
+            if not uid or uid.lower() in ignored:
                 continue
+            remember(r, uid)
             attrs = {k: v for k, v in r.items() if k != user_col and str(v).strip()}
             _upsert_profile(ctx, uid, r.get(phone_col) if phone_col else "", r.get(email_col) if email_col else "", attrs)
             count += 1
     return kind, count, users
 
 
-def ingest_webengage_file(ctx: Ctx, path: Path) -> dict:
+def ingest_webengage_file(ctx: Ctx, path: Path, create_from_profiles: bool = False, category: str | None = None) -> dict:
     """Load one export (every sheet of a workbook). Recognises WebEngage event pivots, aggregated
-    activity lists, event-level exports and user profile exports."""
+    activity lists, event-level exports and user profile exports. With create_from_profiles, a plain list
+    of client codes (no activity) also becomes leads: used when an SM uploads a list to analyse."""
     sheets = _read_sheets(path)
     kinds, total, users = set(), 0, {}
     for sheet, df in sheets.items():
@@ -365,11 +367,11 @@ def ingest_webengage_file(ctx: Ctx, path: Path) -> dict:
         for uid, u in seen.items():
             users.setdefault(uid, u)
     new_leads = 0
-    if users and kinds & {"activity", "events"}:
+    if users and (kinds & {"activity", "events"} or create_from_profiles):
         for uid, u in users.items():
             if u["phone"] or u["email"]:
                 _upsert_profile(ctx, uid, u["phone"], u["email"], {k: v for k, v in u.items() if v})
-        new_leads = create_leads_from_users(ctx, users, path.name)
+        new_leads = create_leads_from_users(ctx, users, path.name, category)
     kind = ",".join(sorted(kinds))
     ctx.conn.execute(
         """INSERT INTO ingested_files (path, mtime, kind, rows, ingested_at) VALUES (?,?,?,?,?)
@@ -378,7 +380,8 @@ def ingest_webengage_file(ctx: Ctx, path: Path) -> dict:
         (str(path), path.stat().st_mtime, kind, total, iso(ctx.now())),
     )
     ctx.conn.commit()
-    return {"file": path.name, "kind": kind, "rows": total, "users": len(users), "new_leads": new_leads}
+    return {"file": path.name, "kind": kind, "rows": total, "users": len(users), "new_leads": new_leads,
+            "client_ids": sorted(users)}
 
 
 def purge_ignored(ctx: Ctx) -> int:

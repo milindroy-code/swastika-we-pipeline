@@ -172,6 +172,8 @@ category_stage:
   "Deposited - no trade yet": funded_no_trade
   "Traded - dormant (30+ days)": dormant_trader
   "Traded - active (last 30 days)": active_trader
+  "Uploaded list - no deposit yet": kyc_no_deposit
+  "Uploaded list - re-activation": dormant_trader
 
 team:
   # DUMMY TEAM for now: replace with the real people before go-live.

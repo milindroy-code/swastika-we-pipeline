@@ -139,6 +139,16 @@ CREATE TABLE IF NOT EXISTS job_runs (
     PRIMARY KEY (job, day)
 );
 
+-- Lists uploaded by SMs for analysis (Customer list page).
+CREATE TABLE IF NOT EXISTS uploads (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename    TEXT NOT NULL,
+    uploaded_by TEXT,
+    uploaded_at TEXT NOT NULL,
+    client_ids  TEXT NOT NULL,           -- JSON list of client codes in the file
+    summary     TEXT                     -- JSON of the analysis result
+);
+
 -- Small editable values shared by the dashboard and the scheduler (e.g. today's market notes).
 CREATE TABLE IF NOT EXISTS settings (
     key        TEXT PRIMARY KEY,

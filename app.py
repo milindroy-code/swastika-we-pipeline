@@ -1,8 +1,10 @@
 """Growth follow-up dashboard.   Run:  python -m streamlit run app.py"""
 from __future__ import annotations
 
+import io
 import json
 import os
+from pathlib import Path
 from datetime import datetime, timedelta
 
 import altair as alt
@@ -20,6 +22,8 @@ from wepipeline.admin import RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, curre
 from wepipeline.db import set_setting
 from wepipeline.sheet_export import COLUMNS, build_rows, export, update_customer_row
 from wepipeline.insights import customer_insight
+from wepipeline.upload import LIST_TYPES, analyse_upload, batch_rows, batch_workbook, list_uploads
+from wepipeline.clientdb import available as client_db_available
 from wepipeline.dialer import DUE_NOW, OVERDUE, dialer_queue, dismiss, next_call, reminders, urgency_counts
 from wepipeline.market import live_notes, refresh as refresh_market
 from wepipeline.excel_report import build_workbook
@@ -748,7 +752,73 @@ def _customer_rows(_ctx_id: int) -> list[dict]:
     return build_rows(ctx)
 
 
+def upload_section() -> None:
+    """SM uploads a list; the system scores, ranks, assigns and pitches it, and shows the results for that list."""
+    st.subheader("📤 Analyse a new list")
+    with st.container(border=True):
+        file = st.file_uploader("Excel or CSV: a WebEngage event export (one sheet per event, like the 4 Oct file) "
+                                "or simply a column of client codes", type=["xlsx", "xls", "csv"], key="sm_upload")
+        c1, c2 = st.columns([3, 2])
+        list_type = c1.radio("What is this list?", list(LIST_TYPES), format_func=lambda k: LIST_TYPES[k][0], key="sm_list_type")
+        db_ok = client_db_available(ctx)
+        use_db = c2.checkbox("Look up each client in the client database (registration, deposit, last trade)", value=db_ok,
+                             disabled=not db_ok, help="Works from the office network. Elsewhere the list type above is used.")
+        if not db_ok:
+            c2.caption("Client database not configured here, so the list type above sets the pitch.")
+        if file is not None and st.button("Analyse, score and assign", type="primary"):
+            folder = ctx.path("data/uploads")
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{ctx.now():%Y%m%d_%H%M%S}_{Path(file.name).name}"
+            path.write_bytes(file.getbuffer())
+            with st.spinner("Reading the file, scoring, ranking, assigning to GMs and writing pitches…"):
+                result = analyse_upload(ctx, path, uploaded_by=me_id, use_client_db=use_db, list_type=list_type)
+            if result.get("error"):
+                st.error(result["error"])
+                return
+            st.session_state["upload_view"] = result["upload_id"]
+            _customer_rows.clear()
+            st.rerun()
+
+    uploads = list_uploads(ctx)
+    if not uploads:
+        return
+    ids = [u["id"] for u in uploads]
+    default = ids.index(st.session_state["upload_view"]) if st.session_state.get("upload_view") in ids else 0
+    pick = st.selectbox("Results for", ids, index=default, key="upload_pick",
+                        format_func=lambda i: next(f"{u['filename'].split('_', 2)[-1]} · {u['uploaded_at'][:16].replace('T', ' ')} · "
+                                                   f"{(ctx.member(u['uploaded_by']) or {}).get('name', u['uploaded_by'] or '')}"
+                                                   for u in uploads if u["id"] == i))
+    up = next(u for u in uploads if u["id"] == pick)
+    s = up["summary"]
+    data = batch_rows(ctx, up["client_ids"])
+    open_rows = [r for r in data if r["status"] == "open"]
+    k = st.columns(6)
+    k[0].metric("Clients in file", len(data))
+    k[1].metric("New to the system", s.get("new_leads", 0))
+    k[2].metric("🔥 Hot", sum(r["priority"] == "🔥 Hot" for r in open_rows))
+    k[3].metric("🌤️ Warm", sum(r["priority"] == "🌤️ Warm" for r in open_rows))
+    k[4].metric("Assigned to GMs", sum(r["gm"] != "Waiting for capacity" for r in open_rows))
+    k[5].metric("Waiting for capacity", sum(r["gm"] == "Waiting for capacity" for r in open_rows))
+    st.caption(f"List type: {s.get('list_type', '')} · Client database: {s.get('ageing', {}).get('detail', '')}"
+               + (f" · {s['closed']} already closed (converted / not interested)" if s.get("closed") else ""))
+    view = pd.DataFrame([{"Rank": r["batch_rank"], "Priority": r["priority"], "Heat": r["heat"], "Client code": r["client"],
+                          "Category": r["category"], "GM": r["gm"], "First call due": r["next_due"], "Best time": r["best_time"],
+                          "Why": (r["levers"].split("\n")[0].lstrip("• ") if r["levers"] else ""), "Opener": r["opener"]}
+                         for r in data])
+    view["Rank"] = pd.to_numeric(view["Rank"], errors="coerce").astype("Int64")
+    st.dataframe(view, hide_index=True, width="stretch", height=420,
+                 column_config={"Opener": st.column_config.TextColumn(width="large"), "Why": st.column_config.TextColumn(width="medium")})
+    buf = io.BytesIO()
+    batch_workbook(ctx, up).save(buf)
+    st.download_button("⬇️ Download the analysed list (.xlsx): scores, GM, levers and full pitch for every client", buf.getvalue(),
+                       file_name=f"analysed_{Path(up['filename']).stem}.xlsx", type="primary",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.divider()
+
+
 def customer_list_page() -> None:
+    upload_section()
+    st.subheader("All customers")
     st.caption("Every customer with priority, activity, levers and pitch. The same list is published to the Google Sheet "
                "when one is configured. It refreshes every 5 minutes here.")
     data = _customer_rows(id(ctx))

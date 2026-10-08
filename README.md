@@ -76,6 +76,19 @@ All weights, tiers and SLAs live under `heat:` in `config.yaml`. The scale of 35
 Core activities are currently `ORDER_PLACED_MOB`, `CALL_ACCEPTED_MOB` and `RECOMMENDATION_LISTING_OPENED_MOB`.
 `DASHBOARD_OPENED_MOB` and `RECOMMENDATION_LANDING_SCREEN_MOB` are non-core. Adjust `heat.core_activities` to change this.
 
+## SMs: analyse an uploaded list
+
+On **Customer list → 📤 Analyse a new list**, an SM uploads an Excel/CSV: a WebEngage event export (one sheet per
+event) or just a column of client codes. They say what the list is (new sign-ups with no deposit, clients to
+re-activate, or mixed). The system then:
+1. Reads every sheet, skips totals rows such as "Others", creates leads for new client codes and loads their activity.
+2. Looks each client up in the client database when it's reachable (office network). A 3-second check skips it
+   otherwise, and the list type sets the pitch instead.
+3. Scores, ranks and assigns hot leads first within GM capacity, and builds every customer's opener, levers and pitch.
+4. Shows the results for that file (rank, priority, GM, first-call time, why, opener) and offers the analysed list as Excel.
+
+Every upload is kept, so earlier lists can be reopened from "Results for".
+
 ## Client ageing (every lead)
 
 `python run.py pull-clients` looks up **every** lead, from any source, in the back-office client tables. It reads the

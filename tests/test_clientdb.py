@@ -91,7 +91,10 @@ def test_activity_file_lead_takes_the_registration_bucket(ctx):
 
 
 def test_connection_string_uses_windows_login_by_default(ctx, monkeypatch):
-    for var in ("CLIENT_DB_CONN", "CLIENT_DB_USER"):
+    import wepipeline.clientdb as clientdb
+
+    monkeypatch.setattr(clientdb, "_load_windows_user_env", lambda: None)  # never read the real profile in tests
+    for var in ("CLIENT_DB_CONN", "CLIENT_DB_USER", "CLIENT_DB_PASSWORD"):
         monkeypatch.delenv(var, raising=False)
     ctx.cfg["sources"]["client_db"]["server"] = "SQL01"
     cs = connection_string(ctx)

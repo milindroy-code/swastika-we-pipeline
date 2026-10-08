@@ -185,6 +185,7 @@ def close_deposited(ctx: Ctx, deposits: pd.DataFrame) -> int:
 # ---------------------------------------------------------------- ageing for every known client
 LOOKUP_SQL = """
 SELECT C.CLIENT_ID, C.REGISTRATION_DATE, C.AccountStatus, C.IsAccountClosed,
+       C.IsSarthiTIOn, C.SarthiActivationDate, C.PreferredSegment,
        F.FirstDeposit, F.FirstDepositDate, F.FTD, F.LTD, F.Holdings
 FROM [Repl_TargetReview].[dbo].[tbl_ClientNew] C
 LEFT JOIN [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F ON C.CLIENT_ID = F.CLIENT_ID
@@ -244,12 +245,16 @@ def classify(ctx: Ctx, rec: dict) -> dict:
             "first_deposit": _num(rec.get("FirstDeposit")) or None, "first_deposit_date": iso(fdd),
             "first_trade_date": iso(ftd), "last_trade_date": iso(ltd), "days_since_last_trade": ltd_days,
             "holdings": _num(rec.get("Holdings")) or None, "account_status": rec.get("AccountStatus") or "",
+            "sarthi_active": (None if rec.get("IsSarthiTIOn") is None or str(rec.get("IsSarthiTIOn")) in {"", "nan", "None"}
+                              else str(rec.get("IsSarthiTIOn")).strip().lower() in {"1", "true", "y", "yes"}),
+            "sarthi_activated_on": iso(parse_dt(rec.get("SarthiActivationDate"), ctx.tz)),
+            "preferred_segment": str(rec.get("PreferredSegment") or "").strip(),
         },
     }
 
 
 LOOKUP_FIELDS = ["CLIENT_ID", "REGISTRATION_DATE", "AccountStatus", "IsAccountClosed", "FirstDeposit",
-                 "FirstDepositDate", "FTD", "LTD", "Holdings"]
+                 "FirstDepositDate", "FTD", "LTD", "Holdings", "IsSarthiTIOn", "SarthiActivationDate", "PreferredSegment"]
 
 
 def enrich_leads(ctx: Ctx, lookup: pd.DataFrame | None = None) -> dict:

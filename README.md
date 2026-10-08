@@ -76,6 +76,18 @@ All weights, tiers and SLAs live under `heat:` in `config.yaml`. The scale of 35
 Core activities are currently `ORDER_PLACED_MOB`, `CALL_ACCEPTED_MOB` and `RECOMMENDATION_LISTING_OPENED_MOB`.
 `DASHBOARD_OPENED_MOB` and `RECOMMENDATION_LANDING_SCREEN_MOB` are non-core. Adjust `heat.core_activities` to change this.
 
+## Sarthi in every pitch
+
+Sarthi (ready trade ideas with entry, target and stop-loss in equity, F&O and commodities) leads every pitch.
+It is matched to the customer's segment (from app activity or `PreferredSegment`), and Sarthi activation comes from
+`IsSarthiTIOn`. The goal of the call is funds in the account: "add funds now so you're ready for Sarthi's next idea",
+using `sarthi.starter_amount` when set.
+
+Sarthi's **track record** is quoted only from what the admin enters on **Admin: rules**: the complete record for the
+period (ideas closed, targets hit, stop-losses hit), a required source, optional approved examples and the disclaimer
+GMs must say. Nothing is quoted until it is entered. Pitches never use "earn", "assured" or "sure-shot" wording, and a
+test enforces it. Have compliance approve the wording before go-live.
+
 ## SMs: analyse an uploaded list
 
 On **Customer list → 📤 Analyse a new list**, an SM uploads an Excel/CSV: a WebEngage event export (one sheet per

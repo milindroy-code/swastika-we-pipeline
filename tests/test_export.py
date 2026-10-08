@@ -46,7 +46,7 @@ def test_rows_carry_priority_levers_and_pitch(ctx):
     buyer, browser, old = data["BUYER"], data["BROWSER"], data["OLD"]
     assert buyer["rank"] == 1 and buyer["priority"] == "🔥 Hot"
     assert "Funding blocker: tried to place 6 order(s)" in buyer["levers"]
-    assert "Research-led" in buyer["levers"]
+    assert "Sarthi user: accepted 2 Sarthi idea(s)" in buyer["levers"]
     assert buyer["opener"].startswith("I noticed you tried to place an order")
     assert buyer["best_time"] == "3 PM–4 PM"
     assert buyer["core_detail"].startswith("Placed an order ×6")

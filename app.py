@@ -22,6 +22,7 @@ from wepipeline.admin import RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, curre
 from wepipeline.db import set_setting
 from wepipeline.sheet_export import COLUMNS, build_rows, export, update_customer_row
 from wepipeline.insights import customer_insight
+from wepipeline import sarthi
 from wepipeline.upload import LIST_TYPES, analyse_upload, batch_rows, batch_workbook, list_uploads
 from wepipeline.clientdb import available as client_db_available
 from wepipeline.dialer import DUE_NOW, OVERDUE, dialer_queue, dismiss, next_call, reminders, urgency_counts
@@ -862,11 +863,51 @@ def time_limits_md() -> str:
     )
 
 
+def sarthi_track_view(editable: bool) -> None:
+    """Sarthi's track record as GMs will quote it. Only the admin can change it (official, complete data)."""
+    t = sarthi.track(ctx)
+    st.subheader("Sarthi track record (quoted to customers)")
+    st.caption("Enter the complete record for the period from official Sarthi data: every closed idea, targets AND "
+               "stop-losses. Never a hand-picked list of wins. Have compliance approve the wording before go-live.")
+    if t.get("updated"):
+        st.caption(f"Last updated {fmt(t['updated'])} · source: {t.get('source') or 'not given'}")
+    preview = [x for x in [sarthi.track_line(ctx, s) for s in sarthi.SEGMENTS] if x]
+    if not editable:
+        st.markdown("\n".join(f"- {x}" for x in preview) or "_Not entered yet: pitches explain Sarthi without numbers._")
+        return
+    period = st.text_input("Period", t["period"], key="sarthi_period")
+    table = pd.DataFrame([{"Segment": s, "Ideas closed": t["segments"].get(s, {}).get("closed", 0),
+                           "Hit target": t["segments"].get(s, {}).get("target", 0),
+                           "Hit stop-loss": t["segments"].get(s, {}).get("stoploss", 0)} for s in sarthi.SEGMENTS])
+    edited = st.data_editor(table, hide_index=True, disabled=["Segment"], key="sarthi_table", width="stretch")
+    highlights = st.text_area("Approved examples (optional, one per line; start with 'F&O:', 'Equity:' or 'Commodity:' to target a segment)",
+                              "\n".join(t["highlights"]), height=90, key="sarthi_highlights")
+    source = st.text_input("Source of these numbers (required)", t.get("source", ""), key="sarthi_source",
+                           placeholder="e.g. Research desk Sarthi performance report, 1–30 Sep")
+    disclaimer = st.text_area("Disclaimer GMs must say", t["disclaimer"], height=70, key="sarthi_disclaimer")
+    if st.button("Save Sarthi track record", type="primary"):
+        if not source.strip():
+            st.error("Say where the numbers come from.")
+            return
+        try:
+            sarthi.save_track(ctx, period, {r["Segment"]: {"closed": r["Ideas closed"], "target": r["Hit target"],
+                                                           "stoploss": r["Hit stop-loss"]} for r in edited.to_dict("records")},
+                              highlights.split("\n"), source, disclaimer)
+            _customer_rows.clear()
+            st.toast("Saved. Pitches use it from now on.")
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+    if preview:
+        st.markdown("**GMs will say:**\n" + "\n".join(f"- {x}" for x in preview) + f"\n\n_{t['disclaimer']}_")
+
+
 def rules_page() -> None:
     st.caption("Only the admin can change these. They apply to every GM straight away, for follow-ups scheduled from now on.")
     if not admin_pin():
         st.warning("Admin editing is switched off. Set an ADMIN_PIN secret (Streamlit Cloud > Settings > Secrets) to enable it.")
         st.markdown(time_limits_md())
+        sarthi_track_view(editable=False)
         return
     if not st.session_state.get("is_admin"):
         pin = st.text_input("Admin PIN", type="password")
@@ -876,6 +917,7 @@ def rules_page() -> None:
                 st.rerun()
             st.error("Wrong PIN.")
         st.markdown(time_limits_md())
+        sarthi_track_view(editable=False)
         return
 
     r, sla = ctx.rules, current_sla(ctx)
@@ -896,6 +938,9 @@ def rules_page() -> None:
             st.rerun()
         except ValueError as e:
             st.error(str(e))
+    st.divider()
+    sarthi_track_view(editable=True)
+    st.divider()
     if st.button("Lock"):
         st.session_state["is_admin"] = False
         st.rerun()

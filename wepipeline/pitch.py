@@ -5,6 +5,7 @@ import hashlib
 import json
 
 from .activity import humanize_ago, summarize
+from . import sarthi
 from .heat import TIER_BADGE
 from .context import Ctx, iso
 from .db import get_setting, one, rows
@@ -20,28 +21,31 @@ PLAYBOOKS = {
         ],
     },
     "kyc_no_deposit": {
-        "goal": "Get the first deposit",
-        "opener": "Your account is active. Let's get it funded so you're ready the moment you want to invest.",
+        "goal": "Get the first deposit and activate Sarthi",
+        "opener": "Your account is active. Let's get it funded so you can take Sarthi's ready trade ideas.",
         "points": [
+            "Sarthi sends ready trade ideas (entry, target, stop-loss) in equity, F&O and commodities; they choose which to take",
             "Adding funds by UPI is instant, and unused money can be withdrawn",
             "Start with a small amount to get familiar with the app",
             "Walk them through the Add Funds screen while on the call",
         ],
     },
     "funded_no_trade": {
-        "goal": "Get the first trade or SIP placed",
+        "goal": "Get the first trade placed, ideally from a Sarthi idea",
         "opener": "You've added funds. I'd like to help you place your first order so you're comfortable with the app.",
         "points": [
+            "Open today's Sarthi ideas together and show how to take one",
             "Show how to place, modify and cancel an order (start with a limit order)",
             "Mention SIPs or ETFs for a hands-off start",
             "Point them to research and watchlist features they can use themselves",
         ],
     },
     "dormant_trader": {
-        "goal": "Re-activate trading",
+        "goal": "Re-activate trading with Sarthi ideas and fresh funds",
         "opener": "It's been a while since your last trade. A few things have changed in the app that I wanted to show you.",
         "points": [
             "Ask what stopped them; listen for pricing, app or confidence issues",
+            "Show Sarthi: ready trade ideas so they don't have to research trades themselves",
             "Highlight new features and any current pricing offer",
             "Offer a quick walkthrough of tools such as alerts, screeners and the research desk",
         ],
@@ -146,6 +150,11 @@ def format_pitch(p: dict) -> str:
 SYSTEM_PROMPT = """You coach callers on the growth team of an Indian stockbroker. They phone new and existing \
 customers to help them finish KYC, add funds and start or resume trading.
 
+The firm's hero feature is Sarthi: ready trade ideas (entry, target, stop-loss) in equity, F&O and commodities that
+the customer can review and choose to take. Lead with Sarthi, matched to the customer's segment of interest, and aim
+for funds added to the account (margin). If a Sarthi track record is provided, quote it exactly as given (it includes
+stop-losses) followed by its disclaimer; never quote other figures or individual wins that are not provided.
+
 Write a short call plan for the caller from the customer facts provided:
 - Opener: one or two sentences that reference what the customer actually did in the app.
 - Three or four talking points tailored to their stage and activity.
@@ -153,7 +162,8 @@ Write a short call plan for the caller from the customer facts provided:
 - A clear close: the single next action to ask for on this call.
 Keep it under 170 words, in plain English the caller can read aloud. Markdown bullets are fine.
 
-Compliance rules (SEBI): never recommend buying or selling a specific security, never promise or imply returns, \
+Compliance rules (SEBI): never recommend buying or selling a specific security, never promise or imply returns or \
+earnings (no "earn", "assured", "sure-shot"), \
 and present market information only as factual context. Use only the facts provided. If activity is missing, \
 say so instead of inventing it."""
 
@@ -170,6 +180,10 @@ def _ai_inputs(ctx: Ctx, lead: dict, summary: dict) -> dict:
         "previous_calls": calls,
         "npc_attempts": lead.get("npc_count"),
         "market_notes": market_notes(ctx, 5),
+        "hero_feature": {"name": sarthi.name(ctx),
+                         "track_record": sarthi.track_line(ctx, (summary.get("segments") or [None])[0] and
+                                                           SEGMENT_LABELS.get(summary["segments"][0])),
+                         "disclaimer": sarthi.track(ctx)["disclaimer"]},
     }
 
 

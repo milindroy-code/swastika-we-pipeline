@@ -34,7 +34,7 @@ COLUMNS = [
     ("Last active in app", "last_active"), ("App actions (30 d)", "events_30d"), ("Core actions", "core_actions"),
     ("Non-core actions", "non_core_actions"), ("Core activity (type × times, recency)", "core_detail"),
     ("Non-core activity", "non_core_detail"), ("Momentum", "momentum"), ("Best time to call", "best_time"),
-    ("Research segments", "segments"), ("Why hot (score drivers)", "heat_reasons"),
+    ("Research segments", "segments"), ("Sarthi status", "sarthi_status"), ("Why hot (score drivers)", "heat_reasons"),
     ("Engagement levers", "levers"), ("Conversation opener", "opener"), ("Pitch ideas", "ideas"),
     ("Next best action", "next_action"), ("Objection to expect", "objection"), ("Updated", "updated"),
 ]

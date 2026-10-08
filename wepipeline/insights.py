@@ -14,13 +14,14 @@ from .clientdb import REGISTERED
 from .context import Ctx, iso, parse_dt
 from .db import rows
 from .heat import TIER_BADGE, contributions, score
+from . import sarthi
 from .pitch import PLAYBOOKS, SEGMENT_LABELS, market_notes
 
 DEFAULT_LABELS = {
     "ORDER_PLACED_MOB": "Placed an order",
-    "CALL_ACCEPTED_MOB": "Accepted a research call",
-    "RECOMMENDATION_LISTING_OPENED_MOB": "Opened research",
-    "RECOMMENDATION_LANDING_SCREEN_MOB": "Visited research home",
+    "CALL_ACCEPTED_MOB": "Accepted a Sarthi idea",
+    "RECOMMENDATION_LISTING_OPENED_MOB": "Opened Sarthi ideas",
+    "RECOMMENDATION_LANDING_SCREEN_MOB": "Visited Sarthi home",
     "DASHBOARD_OPENED_MOB": "Opened the app dashboard",
     REGISTERED: "Registered",
 }
@@ -105,16 +106,26 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     holdings = extra.get("holdings")
     first_dep = extra.get("first_deposit")
     segments = [SEGMENT_LABELS.get(s, s) for s in summary["segments"] if s != "master research"]
+    preferred = sarthi.segment_from_preference(extra.get("preferred_segment"))
+    if preferred and preferred not in segments:
+        segments.append(preferred)
+    seg = segments[0] if segments else None
+    sname = sarthi.name(ctx)
+    sarthi_active = extra.get("sarthi_active")  # True / False from the client database, None if unknown
+    sarthi_calls = sig.get("research_call_accepted", {}).get("count", 0)
 
     # ---- engagement levers: strongest first
     levers = []
     unfunded = stage in {"kyc_pending", "kyc_no_deposit"} and "deposit_success" not in sig
     if "trade_placed" in sig and unfunded:
         levers.append(f"Funding blocker: tried to place {sig['trade_placed']['count']} order(s) with no funds in the account")
-    if "research_call_accepted" in sig:
-        levers.append(f"Research-led: accepted {sig['research_call_accepted']['count']} research call(s)")
+    if sarthi_calls:
+        levers.append(f"{sname} user: accepted {sarthi_calls} {sname} idea(s): needs funds to act on the next one"
+                      if unfunded else f"{sname} user: accepted {sarthi_calls} {sname} idea(s)")
     if segments:
-        levers.append(f"Segment interest: {', '.join(segments)} research")
+        levers.append(f"{sname}-ready: interested in {', '.join(segments)} ideas")
+    if sarthi_active is False:
+        levers.append(f"{sname} not activated yet: activate it on the call")
     if "trade_placed" in sig and not unfunded:
         levers.append(f"Order intent: placed {sig['trade_placed']['count']} order(s) recently; check they went through (margin / balance)")
     if stage == "dormant_trader" and ltd_days is not None:
@@ -143,38 +154,56 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     if lead.get("npc_count", 0) >= 3:
         levers.append(f"Hard to reach: {lead['npc_count']} NPCs in a row" + (f"; try {best_time}" if best_time else ""))
 
-    # ---- conversation opener: from the strongest lever
+    # ---- conversation opener: Sarthi is the hero feature; the goal is funds in the account (margin)
     play = PLAYBOOKS[stage]
-    if stage == "dormant_trader" and ("research_call_accepted" in sig or segments):
+    seg_ideas = f"{seg} trade ideas" if seg else "trade ideas in equity, F&O and commodities"
+    if stage == "dormant_trader":
         gap = _gap(ltd_days) if ltd_days else "a while"
-        opener = (f"It's been {gap} since your last trade, and I saw you've been checking our "
-                  f"{segments[0] + ' ' if segments else ''}research again. Can I help you get set up to act on it?")
-    elif stage == "dormant_trader":
-        opener = f"It's been {_gap(ltd_days)} since your last trade. I wanted to check in and show you what's new in the app." if ltd_days else play["opener"]
+        opener = (f"It's been {gap} since your last trade. {sname} now sends ready {seg_ideas}, each with entry, target and "
+                  f"stop-loss, so you don't have to research trades yourself. Can I show you today's ideas?")
     elif stage == "funded_no_trade":
-        opener = "Your account is funded but you haven't placed a trade yet. Can I walk you through your first order?"
+        opener = (f"Your account is funded but you haven't traded yet. {sname} is an easy way to start: it gives ready "
+                  f"{seg_ideas} with entry, target and stop-loss, and you decide which to take. Shall we look at today's?")
     elif stage == "active_trader":
-        opener = play["opener"]
+        opener = (f"Thanks for trading with us. Have you tried {sname}? It sends ready {seg_ideas} you can review and "
+                  f"take in a tap.")
     elif "trade_placed" in sig and unfunded:
-        opener = "I noticed you tried to place an order in the app. It may not have gone through because the account isn't funded yet. Shall I help you add funds so your next order goes through?"
-    elif "research_call_accepted" in sig:
-        opener = "I saw you've been following our research calls. Your account just needs funding before you can act on them. I can help you do that in a couple of minutes."
-    elif segments:
-        opener = f"I saw you've been looking at our {segments[0]} research. Can I walk you through how to get started in {segments[0]}?"
+        opener = ("I noticed you tried to place an order in the app; it couldn't go through because the account isn't funded yet. "
+                  f"Once you add funds you can also take {sname}'s ready {seg_ideas}. Shall I help you add funds now?")
+    elif sarthi_calls and unfunded:
+        opener = (f"I saw you've been following {sname}'s {seg_ideas}. To take the next one, your account just needs funds. "
+                  "I can help you add them in a couple of minutes.")
+    elif segments and unfunded:
+        opener = (f"I saw you've been looking at {seg} ideas in the app. {sname} sends ready {seg} trade ideas with entry, "
+                  "target and stop-loss, so you don't have to pick trades yourself. Shall I help you get set up?")
     elif reg_days is not None and reg_days <= 2:
-        opener = "Welcome aboard! I'm your Growth Manager. I'm calling to help you get set up and answer any questions about the app."
-    elif reg_days is not None and reg_days > 15:
-        opener = "You opened your account a few weeks ago and I wanted to check in. Was anything stopping you from getting started?"
+        opener = (f"Welcome aboard! I'm your Growth Manager. If picking what to trade feels like a lot, {sname} does the homework: "
+                  "ready trade ideas in equity, F&O and commodities, and you choose which to take. Shall I help you get started?")
+    elif unfunded:
+        opener = (f"You opened your account a little while ago. Many people find choosing trades overwhelming, which is why "
+                  f"{sname} sends ready trade ideas with entry, target and stop-loss. Shall I help you add funds and try the next one?")
     else:
         opener = play["opener"]
 
-    # ---- pitch ideas
+    # ---- pitch ideas: Sarthi story, its complete track record, activation, then margin
     ideas = []
+    record = sarthi.track_line(ctx, seg)
+    if record:
+        ideas.append(f"{record}. Say it as it is, then: past results don't guarantee future ones")
+    else:
+        ideas.append(f"{sname} explained simply: ready ideas with entry, target and stop-loss in {seg or 'equity, F&O and commodities'}; "
+                     "they choose what to take and can start small")
+    example = sarthi.highlight_for(ctx, seg)
+    if example:
+        ideas.append(f"Recent {sname} example: {example}")
+    if sarthi_active is False:
+        ideas.append(f"Activate {sname}{' for ' + seg if seg else ''} with them on the call")
+    elif sarthi_active:
+        ideas.append(f"{sname} is active: open today's {seg or ''} ideas together".replace("  ", " "))
+    if unfunded or stage == "dormant_trader":
+        ideas.append(f"Ask them to add funds now ({sarthi.starter_amount(ctx, seg)}) so they're ready for {sname}'s next idea")
     if "trade_placed" in sig and unfunded:
         ideas.append("Check whether their orders were rejected for low balance, then help them add funds by UPI on the call")
-    if "research_call_accepted" in sig or segments:
-        ideas.append("Show where research calls appear in the app, and that acting on them needs a funded account (no return promises)"
-                     if unfunded else "Show how to act on a research call from the app, and check their available margin (no return promises)")
     if stage == "dormant_trader":
         ideas.append("Ask what stopped them trading (charges, app, losses, time) and note it for the SM")
     if "fando_research" in summary["segments"]:
@@ -183,7 +212,7 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         ideas.append("They're active right now, so call today rather than tomorrow")
     if not core and browse:
         ideas.append("Guide them to one first core step (research → add funds) while they're on the call")
-    ideas += [p for p in play["points"] if p not in ideas][: max(0, 3 - len(ideas))]
+    ideas += [p for p in play["points"] if p not in ideas and sname not in p][: max(0, 3 - len(ideas))]  # Sarthi already covered
     from .market import note_for
 
     context = note_for(ctx, segments) or next(iter(market_notes(ctx, 1)), None)
@@ -191,9 +220,11 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         ideas.append(f"Market context (facts only, no tips): {context}")
 
     best = f" around {best_time}" if best_time else ""
-    action = {"kyc_pending": "Complete KYC on the call", "kyc_no_deposit": "Get the first deposit on the call",
-              "funded_no_trade": "Help place the first order", "dormant_trader": "Re-activate: first trade back",
-              "active_trader": "Add a segment / collect feedback"}[stage]
+    action = {"kyc_pending": f"Complete KYC, then introduce {sname}",
+              "kyc_no_deposit": f"Funds added on the call + {sname} activated",
+              "funded_no_trade": f"First trade, using a {sname} idea",
+              "dormant_trader": f"Funds topped up + first trade back with a {sname} idea",
+              "active_trader": f"{sname} in a new segment + more margin"}[stage]
     next_action = f"{action}; call{best}" if lead.get("heat_tier") != "cold" or best else action
 
     return {
@@ -219,6 +250,9 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         "opener": opener,
         "ideas": "\n".join(f"• {i}" for i in ideas[:4]),
         "next_action": next_action,
-        "objection": OBJECTIONS[stage],
+        "objection": (f"\"I don't know what to trade\": that's what {sname} is for. Ready ideas with a stop-loss; start small, "
+                      "returns aren't guaranteed. " + OBJECTIONS[stage]) if stage in {"kyc_no_deposit", "funded_no_trade", "dormant_trader"}
+                     else OBJECTIONS[stage],
+        "sarthi_status": ("active" if sarthi_active else "not activated" if sarthi_active is False else ""),
         "priority": TIER_BADGE.get(lead.get("heat_tier") or "cold"),
     }

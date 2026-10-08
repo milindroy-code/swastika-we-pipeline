@@ -213,9 +213,9 @@ outputs:
 # Friendlier names for WebEngage events in the sheet and pitches (anything unlisted is tidied automatically).
 activity_labels:
   ORDER_PLACED_MOB: Placed an order
-  CALL_ACCEPTED_MOB: Accepted a research call
-  RECOMMENDATION_LISTING_OPENED_MOB: Opened research
-  RECOMMENDATION_LANDING_SCREEN_MOB: Visited research home
+  CALL_ACCEPTED_MOB: Accepted a Sarthi idea
+  RECOMMENDATION_LISTING_OPENED_MOB: Opened Sarthi ideas
+  RECOMMENDATION_LANDING_SCREEN_MOB: Visited Sarthi home
   DASHBOARD_OPENED_MOB: Opened the app dashboard
 
 # Live market notes, refreshed by the scheduler and sanity-checked (NSE vs Yahoo, ranges, freshness).
@@ -223,6 +223,14 @@ activity_labels:
 market:
   enabled: true
   refresh_minutes: 15
+
+# Sarthi: the hero feature in every pitch (ready trade ideas in equity, F&O, commodities). Its track record is
+# entered by the admin on "Admin: rules" from official data; nothing is shown until it is entered.
+sarthi:
+  name: Sarthi
+  # Suggested first deposit per segment for the "add funds" ask, e.g. { Equity: 5000, "F&O": 25000, Commodity: 10000, default: 5000 }.
+  # Leave empty to say "an amount they're comfortable with".
+  starter_amount: {}
 
 market_notes_file: data/market_notes.md
 

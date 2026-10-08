@@ -22,7 +22,7 @@ BATCH_COLUMNS = [
     ("Assigned GM", "gm"), ("SM", "sm"), ("First call due", "next_due"), ("Registered on", "registered_on"),
     ("Days since registration", "days_since_registration"), ("Deposit status", "deposit_status"),
     ("Last trade date", "last_trade_date"), ("Core activity (type × times, recency)", "core_detail"),
-    ("Non-core activity", "non_core_detail"), ("Best time to call", "best_time"), ("Research segments", "segments"),
+    ("Non-core activity", "non_core_detail"), ("Best time to call", "best_time"), ("Research segments", "segments"), ("Sarthi status", "sarthi_status"),
     ("Why hot (score drivers)", "heat_reasons"), ("Engagement levers", "levers"), ("Conversation opener", "opener"),
     ("Pitch ideas", "ideas"), ("Objection to expect", "objection"), ("Lead status", "status"),
 ]

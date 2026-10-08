@@ -159,7 +159,8 @@ CREATE TABLE IF NOT EXISTS settings (
 
 # Columns added after the first release, so existing databases are upgraded in place.
 LATER_COLUMNS = {
-    "leads": {"heat_score": "REAL NOT NULL DEFAULT 0", "heat_tier": "TEXT NOT NULL DEFAULT 'cold'", "heat_reasons": "TEXT"},
+    "leads": {"heat_score": "REAL NOT NULL DEFAULT 0", "heat_tier": "TEXT NOT NULL DEFAULT 'cold'", "heat_reasons": "TEXT",
+              "campaign": "TEXT NOT NULL DEFAULT ''"},  # list the lead belongs to, e.g. 'reactivation'
     "calls": {"sarthi_activated": "INTEGER NOT NULL DEFAULT 0"},
 }
 

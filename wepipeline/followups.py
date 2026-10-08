@@ -212,7 +212,8 @@ def create_system_followups(ctx: Ctx) -> int:
            AND NOT EXISTS (SELECT 1 FROM followups f WHERE f.lead_id=l.lead_id AND f.status='pending')""",
     )
     for lead in open_leads:
-        since = max(filter(None, [lead["last_contact_at"], lead["assigned_at"]]))
+        # newest of last contact / assignment / first seen (any can be missing on imported data)
+        since = max(filter(None, [lead["last_contact_at"], lead["assigned_at"], lead["first_seen_at"]]), default="")
         last_sys = one(ctx.conn, "SELECT MAX(created_at) AS t FROM followups WHERE lead_id=? AND kind='system'", (lead["lead_id"],))
         if last_sys and last_sys["t"]:
             since = max(since, last_sys["t"])

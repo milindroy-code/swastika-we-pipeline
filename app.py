@@ -637,7 +637,8 @@ def leads_page() -> None:
         st.info("No leads yet. Use 'Sync now' after configuring the lead sheet in config.yaml.")
         return
     df = pd.DataFrame(leads)
-    c0, c1, c2, c3 = st.columns(4)
+    c_list, c0, c1, c2, c3 = st.columns(5)
+    lists = c_list.multiselect("List", ["reactivation", ""], format_func=lambda v: "Re-activation" if v else "(none)")
     tiers = c0.multiselect("Priority", ["hot", "warm", "cold"], format_func=TIER_BADGE.get)
     status = c1.multiselect("Status", sorted(df["status"].unique()), default=["open"])
     owner = c2.multiselect("GM", [m["id"] for m in ctx.callers()], format_func=lambda i: ctx.member(i)["name"])
@@ -646,9 +647,12 @@ def leads_page() -> None:
     view = view[view["heat_tier"].isin(tiers)] if tiers else view
     view = view[view["assigned_to"].isin(owner)] if owner else view
     view = view[view["category"].isin(cat)] if cat else view
-    view = view.assign(GM=view["assigned_to"].map(lambda i: (ctx.member(i) or {}).get("name", "unassigned")),
+    view = view[view["campaign"].isin(lists)] if lists else view
+    view = view.assign(GM=view.apply(lambda r: (ctx.member(r["assigned_to"]) or {}).get(
+                           "name", "watching for engagement" if r["campaign"] == "reactivation" else "unassigned"), axis=1),
+                       List=view["campaign"].map(lambda v: "Re-activation" if v == "reactivation" else ""),
                        priority=view["heat_tier"].map(TIER_BADGE.get))
-    st.dataframe(view[["priority", "heat_score", "lead_id", "name", "phone", "category", "status", "GM", "heat_reasons",
+    st.dataframe(view[["priority", "heat_score", "lead_id", "List", "name", "phone", "category", "status", "GM", "heat_reasons",
                        "npc_count", "last_outcome", "last_contact_at"]],
                  hide_index=True, width="stretch")
 
@@ -757,15 +761,21 @@ def upload_section() -> None:
     """SM uploads a list; the system scores, ranks, assigns and pitches it, and shows the results for that list."""
     st.subheader("📤 Analyse a new list")
     with st.container(border=True):
-        file = st.file_uploader("Excel or CSV: a WebEngage event export (one sheet per event, like the 4 Oct file) "
-                                "or simply a column of client codes", type=["xlsx", "xls", "csv"], key="sm_upload")
-        c1, c2 = st.columns([3, 2])
-        list_type = c1.radio("What is this list?", list(LIST_TYPES), format_func=lambda k: LIST_TYPES[k][0], key="sm_list_type")
+        list_type = st.radio("① What is this list?", list(LIST_TYPES), format_func=lambda k: LIST_TYPES[k][0],
+                             key="sm_list_type", horizontal=True, index=None)
+        if list_type == "reactivation":
+            tiers = " or ".join(TIER_BADGE[t] for t in (ctx.cfg.get("reactivation") or {}).get("assign_tiers", ["hot", "warm"]))
+            st.caption(f"Re-activation: every customer in the file is tagged. Only those whose app activity makes them {tiers} "
+                       "go to GMs; the rest wait in a watching pool and are assigned the moment they engage. Cold ones no GM "
+                       "has worked yet are taken out of GM queues.")
+        file = st.file_uploader("② Upload the file: a WebEngage event export (one sheet per event, like the 4 Oct file) "
+                                "or simply a column of client codes", type=["xlsx", "xls", "csv"], key="sm_upload",
+                                disabled=list_type is None)
         db_ok = client_db_available(ctx)
-        use_db = c2.checkbox("Look up each client in the client database (registration, deposit, last trade)", value=db_ok,
-                             disabled=not db_ok, help="Works from the office network. Elsewhere the list type above is used.")
-        if not db_ok:
-            c2.caption("Client database not configured here, so the list type above sets the pitch.")
+        use_db = st.checkbox("Look up each client in the client database (registration, deposit, last trade, Sarthi)", value=db_ok,
+                             disabled=not db_ok, help="Works from the office network. Elsewhere the list type above sets the pitch.")
+        if list_type is None:
+            st.caption("Choose what the list is first, then upload it.")
         if file is not None and st.button("Analyse, score and assign", type="primary"):
             folder = ctx.path("data/uploads")
             folder.mkdir(parents=True, exist_ok=True)
@@ -798,12 +808,18 @@ def upload_section() -> None:
     k[1].metric("New to the system", s.get("new_leads", 0))
     k[2].metric("🔥 Hot", sum(r["priority"] == "🔥 Hot" for r in open_rows))
     k[3].metric("🌤️ Warm", sum(r["priority"] == "🌤️ Warm" for r in open_rows))
-    k[4].metric("Assigned to GMs", sum(r["gm"] != "Waiting for capacity" for r in open_rows))
-    k[5].metric("Waiting for capacity", sum(r["gm"] == "Waiting for capacity" for r in open_rows))
+    k[4].metric("Assigned to GMs", sum(not r["gm"].startswith("Waiting") for r in open_rows))
+    watching = sum(r["gm"].startswith("Waiting for engagement") for r in open_rows)
+    if watching:
+        k[5].metric("👀 Watching (re-activation)", watching, help="Held back until their app activity makes them warm or hot")
+    else:
+        k[5].metric("Waiting for capacity", sum(r["gm"] == "Waiting for capacity" for r in open_rows))
     st.caption(f"List type: {s.get('list_type', '')} · Client database: {s.get('ageing', {}).get('detail', '')}"
+               + (f" · {s['released_to_watching']} unworked cold customers moved from GM queues to watching"
+                  if s.get("released_to_watching") else "")
                + (f" · {s['closed']} already closed (converted / not interested)" if s.get("closed") else ""))
     view = pd.DataFrame([{"Rank": r["batch_rank"], "Priority": r["priority"], "Heat": r["heat"], "Client code": r["client"],
-                          "Category": r["category"], "GM": r["gm"], "First call due": r["next_due"], "Best time": r["best_time"],
+                          "List": r["list"], "Category": r["category"], "GM": r["gm"], "First call due": r["next_due"], "Best time": r["best_time"],
                           "Why": (r["levers"].split("\n")[0].lstrip("• ") if r["levers"] else ""), "Opener": r["opener"]}
                          for r in data])
     view["Rank"] = pd.to_numeric(view["Rank"], errors="coerce").astype("Int64")
@@ -826,13 +842,14 @@ def customer_list_page() -> None:
     df = pd.DataFrame([{h: r.get(k, "") for h, k in COLUMNS} for r in data])
     for col in ("Rank", "Days since registration", "Days since last trade", "Holdings (₹)"):  # blank for closed leads / clients without a registration date
         df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-    c1, c2, c3, c4 = st.columns(4)
+    c0, c1, c2, c3, c4 = st.columns(5)
+    lst = c0.multiselect("List", sorted(v for v in df["List"].unique() if v) + ["(none)"])
     pr = c1.multiselect("Priority", ["🔥 Hot", "🌤️ Warm", "❄️ Cold"])
     cat = c2.multiselect("Category", sorted(df["Category"].unique()))
     gm = c3.multiselect("GM", sorted(df["GM"].unique()))
     status = c4.multiselect("Lead status", sorted(df["Lead status"].unique()), default=["open"])
-    view = df
-    for col, sel in [("Priority", pr), ("Category", cat), ("GM", gm), ("Lead status", status)]:
+    view = df.assign(List=df["List"].replace("", "(none)"))
+    for col, sel in [("List", lst), ("Priority", pr), ("Category", cat), ("GM", gm), ("Lead status", status)]:
         view = view[view[col].isin(sel)] if sel else view
     k = st.columns(4)
     k[0].metric("Customers", len(view))

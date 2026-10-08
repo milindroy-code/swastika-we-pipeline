@@ -138,6 +138,8 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     unfunded = stage in {"kyc_pending", "kyc_no_deposit"} and "deposit_success" not in sig
     if "trade_placed" in sig and unfunded:
         levers.append(f"Funding blocker: tried to place {sig['trade_placed']['count']} order(s) with no funds in the account")
+    if lead.get("campaign") == "reactivation" and lead.get("heat_tier") in {"hot", "warm"}:
+        levers.append("Re-activation list: engaged in the app again, so this is the moment to call")
     if sarthi_calls:
         levers.append(f"{sname} user: accepted {sarthi_calls} {sname} idea(s): needs funds to act on the next one"
                       if unfunded else f"{sname} user: accepted {sarthi_calls} {sname} idea(s)")

@@ -104,6 +104,12 @@ re-activate, or mixed). The system then:
 
 Every upload is kept, so earlier lists can be reopened from "Results for".
 
+**Re-activation lists** (choose "Re-activation customers"): every customer in the file is tagged "Re-activation", new or
+already known. Only those whose app activity makes them 🔥/🌤️ (`reactivation.assign_tiers`) go to GMs. The rest wait in a
+**watching** pool and are assigned automatically the moment they engage. Cold re-activation customers no GM has worked
+yet (no call, no promised callback or NPC retry) are taken out of GM queues, freeing capacity for engaged leads.
+Customer list and Leads have a **List** filter.
+
 ## Client ageing (every lead)
 
 `python run.py pull-clients` looks up **every** lead, from any source, in the back-office client tables. It reads the

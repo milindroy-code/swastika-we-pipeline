@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 BATCH_COLUMNS = [
     ("Rank in this list", "batch_rank"), ("Overall rank", "rank"), ("Priority", "priority"), ("Heat score", "heat"),
     ("Client code", "client"), ("Name", "name"), ("Phone", "phone"), ("Category", "category"), ("Stage", "stage"),
-    ("Assigned GM", "gm"), ("SM", "sm"), ("First call due", "next_due"), ("Registered on", "registered_on"),
+    ("List", "list"), ("Assigned GM", "gm"), ("SM", "sm"), ("First call due", "next_due"), ("Registered on", "registered_on"),
     ("Days since registration", "days_since_registration"), ("Deposit status", "deposit_status"),
     ("Last trade date", "last_trade_date"), ("Core activity (type × times, recency)", "core_detail"),
     ("Non-core activity", "non_core_detail"), ("Best time to call", "best_time"), ("Research segments", "segments"), ("Sarthi status", "sarthi_status"),
@@ -29,9 +29,9 @@ BATCH_COLUMNS = [
 # What the SM says the list is: sets the category (and so the pitch stage) for customers new to the system.
 # The client database, when reachable, replaces it with the real ageing category.
 LIST_TYPES = {
-    "no_deposit": ("New sign-ups, no deposit yet", "Uploaded list - no deposit yet"),
-    "reactivation": ("Existing clients to re-activate", "Uploaded list - re-activation"),
-    "unknown": ("Mixed / not sure (work it out from app activity)", None),
+    "no_deposit": ("New sign-ups, no deposit yet", "Uploaded list - no deposit yet", ""),
+    "reactivation": ("Re-activation customers (only engaged ones go to GMs)", "Uploaded list - re-activation", "reactivation"),
+    "unknown": ("Mixed / not sure (work it out from app activity)", None, ""),
 }
 TIER_FILL = {"🔥 Hot": "FCDDD9", "🌤️ Warm": "FFF2CC", "❄️ Cold": "E6EFFC"}
 
@@ -46,7 +46,12 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
     if not ids:
         return {"error": "No client codes found. The file needs a ClientCode / User ID column.", "ingest": ingest}
     known_before = ingest["users"] - ingest["new_leads"]
-
+    campaign = LIST_TYPES[list_type][2]
+    if campaign:  # tag every customer in the file, new and already known, so the list can be filtered and handled
+        marks = ",".join("?" * len(ids))
+        ctx.conn.execute(f"UPDATE leads SET campaign=? WHERE lead_id IN ({marks}) AND status='open'", (campaign, *ids))
+        ctx.conn.commit()
+    released = 0
     ageing = {"status": "skipped", "detail": "client database not configured"}
     if use_client_db and available(ctx) and not reachable(ctx):
         ageing = {"status": "unavailable", "detail": "client database not reachable from here (office network / VPN needed)"}
@@ -57,16 +62,24 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
         except Exception as e:  # unreachable from the cloud, wrong password, VPN down...
             log.warning("Client DB ageing skipped: %s", e)
             ageing = {"status": "unavailable", "detail": f"client database not reachable from here ({type(e).__name__})"}
+    if campaign == "reactivation":
+        from .assign import release_unengaged_reactivation
+        from .heat import refresh_heat
+
+        refresh_heat(ctx)  # score first, so only the unengaged are released
+        released = release_unengaged_reactivation(ctx, ids)
     sync = jobs.sync(ctx)  # heat score, assignment (hot first), system follow-ups, overdue checks
 
     marks = ",".join("?" * len(ids))
-    leads = rows(ctx.conn, f"SELECT lead_id, status, heat_tier, assigned_to, category FROM leads WHERE lead_id IN ({marks})", ids)
+    leads = rows(ctx.conn, f"SELECT lead_id, status, heat_tier, assigned_to, category, campaign FROM leads WHERE lead_id IN ({marks})", ids)
     summary = {
         "file": path.name, "kind": ingest["kind"], "list_type": LIST_TYPES[list_type][0], "clients": len(ids), "new_leads": ingest["new_leads"],
         "already_known": known_before, "ageing": ageing,
         "tiers": dict(Counter(l["heat_tier"] for l in leads if l["status"] == "open")),
         "assigned": sum(1 for l in leads if l["status"] == "open" and l["assigned_to"]),
-        "waiting": sum(1 for l in leads if l["status"] == "open" and not l["assigned_to"]),
+        "waiting": sum(1 for l in leads if l["status"] == "open" and not l["assigned_to"] and l["campaign"] != "reactivation"),
+        "watching": sum(1 for l in leads if l["status"] == "open" and not l["assigned_to"] and l["campaign"] == "reactivation"),
+        "released_to_watching": released,
         "closed": sum(1 for l in leads if l["status"] != "open"),
         "not_in_client_db": sum(1 for l in leads if l["category"] == "Not found in client DB"),
         "assignment_run": sync.get("assignment", {}),
@@ -109,7 +122,7 @@ def batch_workbook(ctx: Ctx, upload: dict) -> Workbook:
     ws.append(head)
     for r in data:
         ws.append([r.get(k, "") for _, k in BATCH_COLUMNS])
-    widths = [8, 8, 10, 8, 13, 16, 13, 26, 16, 16, 16, 15, 13, 10, 12, 13, 46, 36, 13, 16, 46, 48, 60, 70, 60, 10]
+    widths = [8, 8, 10, 8, 13, 16, 13, 26, 16, 14, 16, 16, 15, 13, 10, 12, 13, 46, 36, 13, 16, 12, 46, 48, 60, 70, 60, 10]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     for c in ws[1]:
@@ -122,25 +135,28 @@ def batch_workbook(ctx: Ctx, upload: dict) -> Workbook:
             c.alignment = Alignment(wrap_text=True, vertical="top")
     n = max(len(data) + 1, 2)
     last = get_column_letter(len(head))
+    col = {k: get_column_letter(i) for i, (_, k) in enumerate(BATCH_COLUMNS, 1)}  # formulas follow the column order
     for tier, color in TIER_FILL.items():
-        ws.conditional_formatting.add(f"A2:{last}{n}", FormulaRule(formula=[f'$C2="{tier}"'], fill=PatternFill("solid", fgColor=color)))
+        ws.conditional_formatting.add(f"A2:{last}{n}", FormulaRule(formula=[f'${col["priority"]}2="{tier}"'], fill=PatternFill("solid", fgColor=color)))
     ws.freeze_panes = "F2"
     ws.auto_filter.ref = f"A1:{last}{n}"
 
     sm = wb.create_sheet("Summary")
+    P, G, S, C = col["priority"], col["gm"], col["status"], col["client"]
     lines = [
         ("Customer list analysis", ""),
         ("File", s.get("file", upload.get("filename"))),
         ("Uploaded", f"{upload.get('uploaded_at', '')[:16].replace('T', ' ')} by {upload.get('uploaded_by') or ''}"),
         ("", ""),
-        ("Clients in the file", f'=COUNTIFS(\'Analysed list\'!E2:E{n},"<>")'),
+        ("Clients in the file", f'=COUNTIFS(\'Analysed list\'!{C}2:{C}{n},"<>")'),
         ("New to the system", s.get("new_leads", 0)),
         ("Already known", s.get("already_known", 0)),
-        ("🔥 Hot", f'=COUNTIFS(\'Analysed list\'!C2:C{n},"🔥 Hot",\'Analysed list\'!Z2:Z{n},"open")'),
-        ("🌤️ Warm", f'=COUNTIFS(\'Analysed list\'!C2:C{n},"🌤️ Warm",\'Analysed list\'!Z2:Z{n},"open")'),
-        ("❄️ Cold", f'=COUNTIFS(\'Analysed list\'!C2:C{n},"❄️ Cold",\'Analysed list\'!Z2:Z{n},"open")'),
-        ("Assigned to a GM", f'=COUNTIFS(\'Analysed list\'!J2:J{n},"<>Waiting for capacity",\'Analysed list\'!Z2:Z{n},"open")'),
-        ("Waiting for GM capacity", f'=COUNTIFS(\'Analysed list\'!J2:J{n},"Waiting for capacity")'),
+        ("🔥 Hot", f'=COUNTIFS(\'Analysed list\'!{P}2:{P}{n},"🔥 Hot",\'Analysed list\'!{S}2:{S}{n},"open")'),
+        ("🌤️ Warm", f'=COUNTIFS(\'Analysed list\'!{P}2:{P}{n},"🌤️ Warm",\'Analysed list\'!{S}2:{S}{n},"open")'),
+        ("❄️ Cold", f'=COUNTIFS(\'Analysed list\'!{P}2:{P}{n},"❄️ Cold",\'Analysed list\'!{S}2:{S}{n},"open")'),
+        ("Assigned to a GM", f'=COUNTIFS(\'Analysed list\'!{G}2:{G}{n},"<>Waiting*",\'Analysed list\'!{S}2:{S}{n},"open")'),
+        ("Waiting for GM capacity", f'=COUNTIFS(\'Analysed list\'!{G}2:{G}{n},"Waiting for capacity")'),
+        ("Re-activation: watching for engagement", f'=COUNTIFS(\'Analysed list\'!{G}2:{G}{n},"Waiting for engagement*")'),
         ("Client database ageing", s.get("ageing", {}).get("detail", "")),
         ("", ""),
         ("How the heat score works", "core activity ×10, non-core ×3; halves every 3 days since last done; more repeats count more "

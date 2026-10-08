@@ -44,14 +44,49 @@ def first_followup(ctx: Ctx, lead: dict):
     return due, "first_call", reason
 
 
+def engaged_enough(ctx: Ctx, lead: dict) -> bool:
+    """Re-activation customers have a low hit rate, so they reach a GM only once the app shows engagement."""
+    if lead.get("campaign") != "reactivation":
+        return True
+    return (lead.get("heat_tier") or "cold") in set((ctx.cfg.get("reactivation") or {}).get("assign_tiers", ["hot", "warm"]))
+
+
+def release_unengaged_reactivation(ctx: Ctx, lead_ids: list[str] | None = None) -> int:
+    """Give GM capacity back: re-activation customers who are not engaged (below the assign tiers) and whom no GM has
+    worked yet (no call, nothing pending except the automatic first call / system follow-up) go back to watching."""
+    from .db import one
+
+    allowed = set((ctx.cfg.get("reactivation") or {}).get("assign_tiers", ["hot", "warm"]))
+    only = f" AND lead_id IN ({','.join('?' * len(lead_ids))})" if lead_ids else ""
+    released = 0
+    for lead in rows(ctx.conn, "SELECT lead_id, heat_tier FROM leads WHERE campaign='reactivation' AND status='open' "
+                               f"AND assigned_to IS NOT NULL{only}", tuple(lead_ids or ())):
+        if (lead["heat_tier"] or "cold") in allowed:
+            continue
+        worked = one(ctx.conn, "SELECT 1 FROM calls WHERE lead_id=? LIMIT 1", (lead["lead_id"],)) or one(
+            ctx.conn, "SELECT 1 FROM followups WHERE lead_id=? AND status='pending' AND kind NOT IN ('first_call','system') LIMIT 1",
+            (lead["lead_id"],))
+        if worked:
+            continue  # a GM has spoken to them or promised a callback: keep it with that GM
+        ctx.conn.execute("UPDATE followups SET status='cancelled', completed_at=?, reason=COALESCE(reason,'') || ' (released: re-activation, not engaged)' "
+                         "WHERE lead_id=? AND status='pending'", (iso(ctx.now()), lead["lead_id"]))
+        ctx.conn.execute("UPDATE leads SET assigned_to=NULL, assigned_at=NULL WHERE lead_id=?", (lead["lead_id"],))
+        released += 1
+    ctx.conn.commit()
+    return released
+
+
 def assign_new_leads(ctx: Ctx) -> dict:
     from .notify import notify
 
     load = open_load(ctx)
-    assigned, hot, unassigned = {}, {}, 0
+    assigned, hot, unassigned, watching = {}, {}, 0, 0
     # Hottest leads first, so they get a caller even when capacity runs out.
     for lead in rows(ctx.conn, "SELECT * FROM leads WHERE assigned_to IS NULL AND status='open' "
                                "ORDER BY heat_score DESC, first_seen_at, lead_id"):
+        if not engaged_enough(ctx, lead):
+            watching += 1  # held back until their app activity makes them warm or hot
+            continue
         caller = pick_caller(ctx, lead["category"], load)
         if caller is None:
             unassigned += 1
@@ -77,4 +112,5 @@ def assign_new_leads(ctx: Ctx) -> dict:
             notify(ctx, m["id"], "info", "Leads waiting for capacity",
                    f"{unassigned} lead(s) could not be assigned because every GM is at capacity.",
                    once_per_day=True)
-    return {"assigned": sum(assigned.values()), "hot": sum(hot.values()), "by_caller": assigned, "unassigned": unassigned}
+    return {"assigned": sum(assigned.values()), "hot": sum(hot.values()), "by_caller": assigned, "unassigned": unassigned,
+            "watching_reactivation": watching}

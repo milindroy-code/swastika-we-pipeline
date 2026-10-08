@@ -81,3 +81,67 @@ def test_analysed_workbook_has_list_and_summary(ctx, tmp_path):
     ws = wb["Analysed list"]
     assert ws["A1"].value == "Rank in this list" and ws.max_row == 3
     assert wb["Summary"]["B5"].value.startswith("=COUNTIFS(")
+
+
+def test_reactivation_list_only_engaged_customers_go_to_gms(ctx, tmp_path):
+    from wepipeline import jobs
+    from wepipeline.sheet_export import build_rows
+
+    # an existing customer (already assigned) who also appears on the re-activation list
+    ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, status, category, source, extra, assigned_to) VALUES "
+                     "('KNOWN','KNOWN','open','Traded - dormant (30+ days)','Client DB: registered, no deposit','{}','gm_02')")
+    path = tmp_path / "reactivation_oct.xlsx"
+    with pd.ExcelWriter(path) as xl:
+        pivot("CALL_ACCEPTED_MOB", {"ENGAGED": {"8 Oct, 10AM": 5}}).to_excel(xl, sheet_name="CALL_ACCEPTED_MOB", index=False)
+        pivot("ORDER_PLACED_MOB", {"ENGAGED": {"8 Oct, 9AM": 3}}).to_excel(xl, sheet_name="ORDER_PLACED_MOB", index=False)
+        pivot("DASHBOARD_OPENED_MOB", {"QUIET": {"7 Oct, 6PM": 1}, "KNOWN": {"7 Oct, 6PM": 1}}).to_excel(
+            xl, sheet_name="DASHBOARD_OPENED_MOB", index=False)
+    s = analyse_upload(ctx, path, uploaded_by="sm_01", list_type="reactivation")
+    tags = {r["lead_id"]: (r["campaign"], r["assigned_to"], r["heat_tier"])
+            for r in rows(ctx.conn, "SELECT lead_id, campaign, assigned_to, heat_tier FROM leads")}
+    assert {k: v[0] for k, v in tags.items()} == {"ENGAGED": "reactivation", "QUIET": "reactivation", "KNOWN": "reactivation"}
+    assert tags["ENGAGED"][1] is not None and tags["ENGAGED"][2] in ("hot", "warm")   # engaged: straight to a GM
+    assert tags["QUIET"][1] is None                                                    # not engaged: watching
+    assert tags["KNOWN"][1] is None             # cold and never worked by its GM: released back to watching
+    assert (s["watching"], s["waiting"], s["released_to_watching"]) == (2, 0, 1)
+    rows_ = {r["client"]: r for r in build_rows(ctx)}
+    assert rows_["QUIET"]["gm"] == "Waiting for engagement (re-activation)" and rows_["QUIET"]["list"] == "Re-activation"
+    assert "Re-activation list: engaged in the app again" in rows_["ENGAGED"]["levers"]
+
+    # QUIET starts using the app: on the next sync it is scored up and handed to a GM
+    for name, n in [("CALL_ACCEPTED_MOB", 6), ("ORDER_PLACED_MOB", 4)]:
+        ctx.conn.execute("INSERT INTO events (user_id, event_name, event_time, attrs) VALUES (?,?,?,?)",
+                         ("QUIET", name, NOW.isoformat(), f'{{"count": {n}}}'))
+    ctx.conn.commit()
+    res = jobs.sync(ctx)
+    assert res["assignment"]["watching_reactivation"] == 1  # KNOWN is still not engaged
+    assert one(ctx.conn, "SELECT assigned_to FROM leads WHERE lead_id='QUIET'")["assigned_to"] is not None
+
+
+def test_reactivation_threshold_is_configurable(ctx, tmp_path):
+    ctx.cfg["reactivation"] = {"assign_tiers": ["hot"]}
+    path = tmp_path / "r.xlsx"
+    with pd.ExcelWriter(path) as xl:
+        pivot("DASHBOARD_OPENED_MOB", {"WARMISH": {"8 Oct, 10AM": 12}}).to_excel(xl, sheet_name="D", index=False)
+        pivot("CALL_ACCEPTED_MOB", {"WARMISH": {"8 Oct, 9AM": 1}}).to_excel(xl, sheet_name="CALL_ACCEPTED_MOB", index=False)
+    analyse_upload(ctx, path, list_type="reactivation")
+    lead = one(ctx.conn, "SELECT heat_tier, assigned_to FROM leads WHERE lead_id='WARMISH'")
+    assert lead["heat_tier"] != "hot" and lead["assigned_to"] is None
+
+
+def test_reactivation_upload_releases_unworked_cold_customers_only(ctx, tmp_path):
+    from wepipeline.followups import add_followup, log_call
+
+    for lid in ("COLD_UNWORKED", "COLD_CALLED", "COLD_PROMISED"):
+        ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, status, category, source, extra, assigned_to, assigned_at) "
+                         "VALUES (?,?,?,?,?,?,?,?)", (lid, lid, "open", "x", "WebEngage activity (t)", "{}", "gm_03", NOW.isoformat()))
+        add_followup(ctx, lid, "gm_03", NOW, "first_call", "New lead")
+    log_call(ctx, "COLD_CALLED", "gm_03", "interested", "spoke yesterday")
+    add_followup(ctx, "COLD_PROMISED", "gm_03", NOW.replace(hour=16), "promised", "call at 4")
+    path = tmp_path / "react.csv"
+    pd.DataFrame({"ClientCode": ["COLD_UNWORKED", "COLD_CALLED", "COLD_PROMISED"]}).to_csv(path, index=False)
+    s = analyse_upload(ctx, path, list_type="reactivation")
+    owner = {r["lead_id"]: r["assigned_to"] for r in rows(ctx.conn, "SELECT lead_id, assigned_to FROM leads")}
+    assert owner == {"COLD_UNWORKED": None, "COLD_CALLED": "gm_03", "COLD_PROMISED": "gm_03"}
+    assert s["released_to_watching"] == 1 and s["watching"] == 1
+    assert one(ctx.conn, "SELECT COUNT(*) n FROM followups WHERE lead_id='COLD_UNWORKED' AND status='pending'")["n"] == 0

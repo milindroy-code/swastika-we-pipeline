@@ -155,6 +155,11 @@ heat:
   require_phone_for_new_leads: false
   new_lead_category: "New user - app activity"
 
+# Re-activation lists (uploaded on Customer list with "Re-activation customers"): low hit rate, so they reach a GM
+# only once their app activity puts them in one of these heat tiers. Until then they wait in a "watching" pool.
+reactivation:
+  assign_tiers: [hot, warm]
+
 # Map your sheet's categories to a lifecycle stage so the right playbook is used.
 # Stages: kyc_pending, kyc_no_deposit, funded_no_trade, dormant_trader, active_trader.
 # Unmapped categories fall back to a stage inferred from app activity.

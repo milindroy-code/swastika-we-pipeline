@@ -326,7 +326,7 @@ def _chip(text: str, color: str = "gray") -> str:
 
 
 STAGE_NAMES = {"kyc pending": "KYC pending", "kyc no deposit": "No deposit yet", "funded no trade": "Funded, no trade yet",
-               "dormant trader": "Dormant trader", "active trader": "Active trader"}
+               "dormant trader": "Dormant trader", "active trader": "Active trader", "payout": "💸 Payout requested"}
 
 
 def _stage_line(ins: dict) -> str:
@@ -638,7 +638,9 @@ def leads_page() -> None:
         return
     df = pd.DataFrame(leads)
     c_list, c0, c1, c2, c3 = st.columns(5)
-    lists = c_list.multiselect("List", ["reactivation", ""], format_func=lambda v: "Re-activation" if v else "(none)")
+    lists = c_list.multiselect("List", ["new", "reactivation", "payout", ""],
+                               format_func=lambda v: {"new": "New, no deposit", "reactivation": "Re-activation",
+                                                      "payout": "Payout"}.get(v, "(none)"))
     tiers = c0.multiselect("Priority", ["hot", "warm", "cold"], format_func=TIER_BADGE.get)
     status = c1.multiselect("Status", sorted(df["status"].unique()), default=["open"])
     owner = c2.multiselect("GM", [m["id"] for m in ctx.callers()], format_func=lambda i: ctx.member(i)["name"])
@@ -650,7 +652,8 @@ def leads_page() -> None:
     view = view[view["campaign"].isin(lists)] if lists else view
     view = view.assign(GM=view.apply(lambda r: (ctx.member(r["assigned_to"]) or {}).get(
                            "name", "watching for engagement" if r["campaign"] == "reactivation" else "unassigned"), axis=1),
-                       List=view["campaign"].map(lambda v: "Re-activation" if v == "reactivation" else ""),
+                       List=view["campaign"].map(lambda v: {"new": "New, no deposit", "reactivation": "Re-activation",
+                                                            "payout": "Payout"}.get(v, "")),
                        priority=view["heat_tier"].map(TIER_BADGE.get))
     st.dataframe(view[["priority", "heat_score", "lead_id", "List", "name", "phone", "category", "status", "GM", "heat_reasons",
                        "npc_count", "last_outcome", "last_contact_at"]],
@@ -706,15 +709,8 @@ def reports_page() -> None:
 
 def admin_page() -> None:
     st.subheader("WebEngage exports")
-    folder = ctx.path(ctx.cfg["sources"]["webengage"]["folder"])
-    uploads = st.file_uploader("Upload WebEngage exports (.xlsx / .csv): event pivots, activity lists, events or users",
-                               type=["csv", "xlsx", "json"], accept_multiple_files=True)
-    if uploads and st.button("Load uploaded files", type="primary"):
-        folder.mkdir(parents=True, exist_ok=True)
-        for f in uploads:
-            (folder / f.name).write_bytes(f.getbuffer())
-        st.write(sync_webengage(ctx))
-        st.write(jobs.sync(ctx)["assignment"])  # score and assign the new leads straight away
+    st.info("To upload a list, go to **Customer list → 📤 Analyse a new list**: choose the category, upload the file, and it is "
+            "scored, ranked, assigned and pitched in one go. Files loaded so far:")
     files = rows(ctx.conn, "SELECT path, kind, rows, ingested_at FROM ingested_files ORDER BY ingested_at DESC")
     if files:
         st.dataframe(pd.DataFrame(files), hide_index=True, width="stretch")
@@ -761,15 +757,20 @@ def upload_section() -> None:
     """SM uploads a list; the system scores, ranks, assigns and pitches it, and shows the results for that list."""
     st.subheader("📤 Analyse a new list")
     with st.container(border=True):
-        list_type = st.radio("① What is this list?", list(LIST_TYPES), format_func=lambda k: LIST_TYPES[k][0],
+        list_type = st.radio("① What is this list?", ["no_deposit", "reactivation", "payout"], format_func=lambda k: LIST_TYPES[k][0],
                              key="sm_list_type", horizontal=True, index=None)
+        if list_type == "payout":
+            st.caption("Payout: every customer goes to a GM first in line, with a 30-minute first call. The pitch is retention: "
+                       "confirm the payout goes through as normal, ask why, and offer pricing, Sarthi or an RM. If the file has "
+                       "payout amount / date columns, GMs see them.")
         if list_type == "reactivation":
             tiers = " or ".join(TIER_BADGE[t] for t in (ctx.cfg.get("reactivation") or {}).get("assign_tiers", ["hot", "warm"]))
             st.caption(f"Re-activation: every customer in the file is tagged. Only those whose app activity makes them {tiers} "
                        "go to GMs; the rest wait in a watching pool and are assigned the moment they engage. Cold ones no GM "
                        "has worked yet are taken out of GM queues.")
         file = st.file_uploader("② Upload the file: a WebEngage event export (one sheet per event, like the 4 Oct file) "
-                                "or simply a column of client codes", type=["xlsx", "xls", "csv"], key="sm_upload",
+                                "or simply a column of client codes", type=["xlsx", "xls", "csv"],
+                                key=f"sm_upload_{st.session_state.get('upload_nonce', 0)}",
                                 disabled=list_type is None)
         db_ok = client_db_available(ctx)
         use_db = st.checkbox("Look up each client in the client database (registration, deposit, last trade, Sarthi)", value=db_ok,
@@ -787,6 +788,7 @@ def upload_section() -> None:
                 st.error(result["error"])
                 return
             st.session_state["upload_view"] = result["upload_id"]
+            st.session_state["upload_nonce"] = st.session_state.get("upload_nonce", 0) + 1  # clear the box for the next list
             _customer_rows.clear()
             st.rerun()
 
@@ -810,10 +812,10 @@ def upload_section() -> None:
     k[3].metric("🌤️ Warm", sum(r["priority"] == "🌤️ Warm" for r in open_rows))
     k[4].metric("Assigned to GMs", sum(not r["gm"].startswith("Waiting") for r in open_rows))
     watching = sum(r["gm"].startswith("Waiting for engagement") for r in open_rows)
-    if watching:
-        k[5].metric("👀 Watching (re-activation)", watching, help="Held back until their app activity makes them warm or hot")
-    else:
-        k[5].metric("Waiting for capacity", sum(r["gm"] == "Waiting for capacity" for r in open_rows))
+    waiting = sum(r["gm"] == "Waiting for capacity" for r in open_rows)
+    k[5].metric("Waiting: capacity · 👀 engagement", f"{waiting} · {watching}",
+                help="Capacity: engaged, but every GM is full. Engagement: re-activation customers held back until their "
+                     "app activity makes them warm or hot.")
     st.caption(f"List type: {s.get('list_type', '')} · Client database: {s.get('ageing', {}).get('detail', '')}"
                + (f" · {s['released_to_watching']} unworked cold customers moved from GM queues to watching"
                   if s.get("released_to_watching") else "")

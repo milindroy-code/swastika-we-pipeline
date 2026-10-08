@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 
 from .context import Ctx, load_config
 
@@ -166,11 +167,49 @@ LATER_COLUMNS = {
 
 
 # ---------------------------------------------------------------- SQLite (local / tests)
-def connect_sqlite(path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+def _open_sqlite(path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")  # dashboard and scheduler run side by side
     conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+class SqliteConnection:
+    """One SQLite connection per thread. The dashboard serves several sessions and an auto-refresh at once; sharing a
+    single connection between threads fails with 'bad parameter or other API misuse' under load."""
+
+    def __init__(self, path):
+        self.path = str(path)
+        self._local = threading.local()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._local.conn = _open_sqlite(self.path)
+        return conn
+
+    def execute(self, sql: str, params=()):
+        return self._conn().execute(sql, params)
+
+    def executescript(self, script: str):
+        return self._conn().executescript(script)
+
+    def commit(self) -> None:
+        self._conn().commit()
+
+    def rollback(self) -> None:
+        self._conn().rollback()
+
+    def close(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
+
+
+def connect_sqlite(path) -> SqliteConnection:
+    conn = SqliteConnection(path)
     conn.executescript(SCHEMA)
     for table, cols in LATER_COLUMNS.items():
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}

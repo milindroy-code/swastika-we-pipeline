@@ -131,10 +131,11 @@ def queue_for(ctx: Ctx, agent_id: str) -> list[dict]:
     return rows(
         ctx.conn,
         """SELECT f.*, l.name, l.phone, l.category, l.npc_count, l.last_outcome, l.last_contact_at,
-                  l.heat_score, l.heat_tier, l.heat_reasons
+                  l.heat_score, l.heat_tier, l.heat_reasons, l.campaign
            FROM followups f JOIN leads l ON l.lead_id = f.lead_id
            WHERE f.agent_id=? AND f.status='pending' AND l.status='open'
-           ORDER BY CASE l.heat_tier WHEN 'hot' THEN 0 WHEN 'warm' THEN 1 ELSE 2 END, f.due_at, l.heat_score DESC""",
+           ORDER BY CASE WHEN l.campaign='payout' THEN 0 WHEN l.heat_tier='hot' THEN 0 WHEN l.heat_tier='warm' THEN 1 ELSE 2 END,
+                    f.due_at, l.heat_score DESC""",
         (agent_id,),
     )
 
@@ -162,6 +163,8 @@ def check_overdue(ctx: Ctx) -> dict:
     from .notify import notify
 
     now = ctx.now()
+    # housekeeping: a cancelled follow-up (customer deposited, account closed, lead released) can't be missed
+    ctx.conn.execute("DELETE FROM alerts WHERE followup_id IN (SELECT id FROM followups WHERE status='cancelled')")
     warn_cut = iso(now - timedelta(minutes=ctx.rules.get("warning_after_minutes", 15)))
     esc_cut = iso(now - timedelta(minutes=ctx.rules.get("escalate_after_minutes", 60)))
     warned = escalated = 0

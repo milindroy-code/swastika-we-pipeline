@@ -55,7 +55,7 @@ def dialer_queue(ctx: Ctx, agent_id: str) -> list[dict]:
     # overdue: not-yet-escalated first, closest to escalating first (they can still be saved);
     # then already-escalated ones, hot first. Other groups: hot first, then earliest due.
     def key(x):
-        tier = TIER_RANK.get(x["heat_tier"] or "cold", 2)
+        tier = 0 if x.get("campaign") == "payout" else TIER_RANK.get(x["heat_tier"] or "cold", 2)  # payouts rank with hot
         if x["group"] == OVERDUE and not x["already_escalated"]:
             return (OVERDUE, 0, x["escalates_in"], tier, x["due"])
         return (x["group"], 1 if x["group"] == OVERDUE else 0, tier, 0, x["due"])

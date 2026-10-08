@@ -15,7 +15,7 @@ from .context import Ctx, iso, parse_dt
 from .db import rows
 from .heat import TIER_BADGE, contributions, score
 from . import sarthi
-from .pitch import PLAYBOOKS, SEGMENT_LABELS, market_notes
+from .pitch import PLAYBOOKS, market_notes, segment_label
 
 DEFAULT_LABELS = {
     "ORDER_PLACED_MOB": "Placed an order",
@@ -32,11 +32,18 @@ OBJECTIONS = {
     "funded_no_trade": "\"I don't know what to buy\": show the research section and how to place a limit order; the choice stays theirs.",
     "dormant_trader": "\"Charges / app issues\": ask what stopped them, note it for the SM, and show what has changed.",
     "active_trader": "\"I'm fine for now\": ask for feedback and mention segments they haven't activated, with risk disclosures.",
+    "payout": "\"I need the money\": respect it; the payout is processed as normal. Ask if a small balance can stay for Sarthi's next idea.",
 }
 
 
 def objection_lines(stage: str, sname: str, pricing: str, rm_line: str) -> str:
     """The two or three objections most likely on this call, each with a one-line answer."""
+    if stage == "payout":
+        lines = [OBJECTIONS["payout"].replace("\": ", "\" → ", 1)]
+        if pricing:
+            lines.append(f"\"I'm moving to Zerodha / Groww\" → {pricing}" + (f"; and {rm_line}" if rm_line else "") + ".")
+        lines.append(f"\"I lost money\" → {sname} ideas come with a stop-loss; start small, returns aren't guaranteed.")
+        return " · ".join(lines)
     lines = []
     if stage in {"kyc_no_deposit", "funded_no_trade", "dormant_trader", "kyc_pending"}:
         lines.append(f"\"I don't know what to trade\" → that's what {sname} is for: ready ideas with a stop-loss; start small, "
@@ -54,7 +61,8 @@ def activity_label(ctx: Ctx, activity: str) -> str:
     base = activity.split(" · ")[0].strip()
     name = labels.get(base) or labels.get(base.upper()) or base.replace("_MOB", "").replace("_", " ").title()
     seg = segment_of(activity)
-    return f"{name}: {SEGMENT_LABELS.get(seg, seg)}" if seg and seg != "master research" else name
+    label = segment_label(seg)
+    return f"{name}: {label}" if label and label != "Research home" else name
 
 
 def _when(days: float) -> str:
@@ -119,7 +127,7 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     ltd_days = extra.get("days_since_last_trade")
     holdings = extra.get("holdings")
     first_dep = extra.get("first_deposit")
-    segments = [SEGMENT_LABELS.get(s, s) for s in summary["segments"] if s != "master research"]
+    segments = list(dict.fromkeys(l for l in (segment_label(s) for s in summary["segments"]) if l and l != "Research home"))
     preferred = sarthi.segment_from_preference(extra.get("preferred_segment"))
     if preferred and preferred not in segments:
         segments.append(preferred)
@@ -127,6 +135,8 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     sname = sarthi.name(ctx)
     sarthi_active = extra.get("sarthi_active")  # True / False from the client database, None if unknown
     sarthi_calls = sig.get("research_call_accepted", {}).get("count", 0)
+    payout_amt = extra.get("payout_amount")
+    payout_txt = f"₹{payout_amt:,.0f} " if payout_amt else ""
     offers = ctx.cfg.get("offers") or {}
     pricing = offers.get("pricing_line", "")
     rm_line = offers.get("rm_line", "")
@@ -138,6 +148,10 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     unfunded = stage in {"kyc_pending", "kyc_no_deposit"} and "deposit_success" not in sig
     if "trade_placed" in sig and unfunded:
         levers.append(f"Funding blocker: tried to place {sig['trade_placed']['count']} order(s) with no funds in the account")
+    if stage == "payout":
+        when = parse_dt(extra.get("payout_date"), ctx.tz)
+        levers.insert(0, f"Payout requested{(' of ' + payout_txt.strip()) if payout_txt else ''}"
+                         f"{(' on ' + when.strftime('%d %b')) if when else ''}: call before the funds leave")
     if lead.get("campaign") == "reactivation" and lead.get("heat_tier") in {"hot", "warm"}:
         levers.append("Re-activation list: engaged in the app again, so this is the moment to call")
     if sarthi_calls:
@@ -181,7 +195,10 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     # ---- conversation opener: Sarthi is the hero feature; the goal is funds in the account (margin)
     play = PLAYBOOKS[stage]
     seg_ideas = f"{seg} trade ideas" if seg else "trade ideas in equity, F&O and commodities"
-    if stage == "dormant_trader":
+    if stage == "payout":
+        opener = (f"I'm calling about the {payout_txt}withdrawal you requested. It's being processed as normal; I just wanted "
+                  "to check everything is okay with your account, and whether there's anything we could do better?")
+    elif stage == "dormant_trader":
         gap = _gap(ltd_days) if ltd_days else "a while"
         opener = (f"It's been {gap} since your last trade. {sname} now sends ready {seg_ideas}, each with entry, target and "
                   f"stop-loss, so you don't have to research trades yourself. Can I show you today's ideas?")
@@ -208,13 +225,24 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
                   f"{sname} sends ready trade ideas with entry, target and stop-loss. Shall I help you add funds and try the next one?")
     else:
         opener = play["opener"]
-    if sarthi_active is False and needs_sarthi:
+    if sarthi_active is False and needs_sarthi and stage != "payout":
         opener += f" The first step is switching on {sname} so its ideas start reaching you."
 
     # ---- pitch ideas: Sarthi story, its complete track record, activation, then margin
     ideas = []
     record = sarthi.track_line(ctx, seg)
-    if record:
+    if stage == "payout":
+        ideas.append("Never delay or discourage the withdrawal: confirm it's being processed, then ask why they're withdrawing")
+        if pricing:
+            ideas.append(f"If it's charges: {pricing}")
+        ideas.append(f"If they're unsure what to trade or had losses: {sname} ideas come with a stop-loss"
+                     + (f" ({record})" if record else ""))
+        if rm_line:
+            ideas.append(f"If managing trades is hard: offer {rm_line}")
+        ideas.append(f"Ask if they'd like to keep part of the balance for {sname}'s next idea (entirely their choice)")
+    if stage == "payout":
+        pass
+    elif record:
         ideas.append(f"{record}. Say it as it is, then: past results don't guarantee future ones")
     else:
         ideas.append(f"{sname} explained simply: ready ideas with entry, target and stop-loss in {seg or 'equity, F&O and commodities'}; "
@@ -226,13 +254,13 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         ideas.append(f"Check {sname} is activated (it's needed to receive the ideas); if not, activate it with them now")
     elif sarthi_active:
         ideas.append(f"{sname} is active: open today's {seg or ''} ideas together".replace("  ", " "))
-    example = sarthi.highlight_for(ctx, seg)
+    example = sarthi.highlight_for(ctx, seg) if stage != "payout" else None
     if example:
         ideas.append(f"Recent {sname} example: {example}")
-    if unfunded or stage == "dormant_trader":
+    if (unfunded or stage == "dormant_trader") and stage != "payout":
         ideas.append(f"Ask them to add funds now ({sarthi.starter_amount(ctx, seg)}) so they're ready for {sname}'s next idea")
     price_point = f"Pricing: {pricing}" if pricing and stage in {"kyc_no_deposit", "kyc_pending", "funded_no_trade", "dormant_trader"} else None
-    rm_point = f"If managing trades feels like too much, offer {rm_line}" if offer_rm else None
+    rm_point = f"If managing trades feels like too much, offer {rm_line}" if offer_rm and stage != "payout" else None
     for point in ([rm_point, price_point] if stage == "dormant_trader" or high_value else [price_point, rm_point]):
         if point:
             ideas.append(point)
@@ -240,7 +268,7 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         ideas.append("Check whether their orders were rejected for low balance, then help them add funds by UPI on the call")
     if stage == "dormant_trader":
         ideas.append("Ask what stopped them trading (charges, app, losses, time) and note it for the SM")
-    if "fando_research" in summary["segments"]:
+    if "F&O" in segments:
         ideas.append("If they want F&O: explain margin and the mandatory risk disclosure before anything else")
     if momentum == "Rising":
         ideas.append("They're active right now, so call today rather than tomorrow")
@@ -258,8 +286,9 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
               "kyc_no_deposit": f"{sname} activated + funds added on the call",
               "funded_no_trade": f"First trade, using a {sname} idea",
               "dormant_trader": f"Funds topped up + first trade back with a {sname} idea",
-              "active_trader": f"{sname} in a new segment + more margin"}[stage]
-    if sarthi_active is not True and needs_sarthi and not action.startswith(sname):
+              "active_trader": f"{sname} in a new segment + more margin",
+              "payout": "Understand why they're withdrawing; keep the relationship (and part of the funds, if they choose)"}[stage]
+    if sarthi_active is not True and needs_sarthi and not action.startswith(sname) and stage != "payout":
         action = f"{sname} activated + " + action[0].lower() + action[1:]
     next_action = f"{action}; call{best}" if lead.get("heat_tier") != "cold" or best else action
 

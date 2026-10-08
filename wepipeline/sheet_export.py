@@ -17,6 +17,7 @@ from .activity import humanize_ago
 from .context import Ctx, parse_dt
 from .db import rows
 from .followups import KIND_LABELS, OUTCOMES
+from .assign import engaged_enough
 from .insights import customer_insight
 
 log = logging.getLogger(__name__)
@@ -74,9 +75,9 @@ def build_rows(ctx: Ctx, lead_id: str | None = None) -> list[dict]:
             "phone": lead["phone"] or "",
             "category": lead["category"] or "",
             "status": lead["status"],
-            "gm": gm.get("name", ("Waiting for engagement (re-activation)" if lead.get("campaign") == "reactivation"
-                                  else "Waiting for capacity") if lead["status"] == "open" else ""),
-            "list": {"reactivation": "Re-activation"}.get(lead.get("campaign") or "", ""),
+            "gm": gm.get("name", ("Waiting for capacity" if engaged_enough(ctx, lead)
+                                  else "Waiting for engagement (re-activation)") if lead["status"] == "open" else ""),
+            "list": {"new": "New, no deposit", "reactivation": "Re-activation", "payout": "Payout"}.get(lead.get("campaign") or "", ""),
             "sm": (ctx.member(ctx.sm_of(gm)) or {}).get("name", ""),
             "next_due": due.strftime("%d %b %H:%M") if due else "",
             "next_kind": KIND_LABELS.get(nxt["kind"], "") if nxt else "",

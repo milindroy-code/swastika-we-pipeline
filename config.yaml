@@ -32,6 +32,7 @@ rules:
   escalate_after_minutes: 60    # overdue by this much -> escalated to the manager, counted as a miss
   stale_after_days: 3           # open lead with no contact for this long -> system follow-up
   sync_interval_minutes: 5      # how often `run.py loop` syncs sources and checks follow-ups
+  minutes_per_call: 5           # a GM's pace: bulk first calls are spaced this far apart, highest priority first
 
 sources:
   leads:
@@ -155,6 +156,11 @@ heat:
   require_phone_for_new_leads: false
   new_lead_category: "New user - app activity"
 
+# Payout lists (uploaded on Customer list with "Customers doing a payout"): money is leaving, so every customer goes
+# to a GM, first in line. The retention pitch never delays or discourages the withdrawal.
+payout:
+  first_call_minutes: 30
+
 # Re-activation lists (uploaded on Customer list with "Re-activation customers"): low hit rate, so they reach a GM
 # only once their app activity puts them in one of these heat tiers. Until then they wait in a "watching" pool.
 reactivation:
@@ -179,6 +185,7 @@ category_stage:
   "Traded - active (last 30 days)": active_trader
   "Uploaded list - no deposit yet": kyc_no_deposit
   "Uploaded list - re-activation": dormant_trader
+  "Uploaded list - payout": payout
 
 team:
   # DUMMY TEAM for now: replace with the real people before go-live.

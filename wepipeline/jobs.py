@@ -6,7 +6,7 @@ import os
 import time as _time
 from datetime import date
 
-from .assign import assign_new_leads
+from .assign import assign_new_leads, rebalance
 from .context import Ctx, iso
 from .db import one
 from .followups import check_overdue, create_system_followups, reroll_outside_hours
@@ -33,6 +33,7 @@ def sync(ctx: Ctx) -> dict:
         result["webengage"] = {"error": str(e)}
     result["purged_placeholders"] = purge_ignored(ctx)
     result["heat"] = refresh_heat(ctx)
+    result["rebalanced"] = rebalance(ctx)
     result["assignment"] = assign_new_leads(ctx)
     result["system_followups"] = create_system_followups(ctx)
     result["rerolled"] = reroll_outside_hours(ctx)

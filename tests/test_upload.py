@@ -145,3 +145,29 @@ def test_reactivation_upload_releases_unworked_cold_customers_only(ctx, tmp_path
     assert owner == {"COLD_UNWORKED": None, "COLD_CALLED": "gm_03", "COLD_PROMISED": "gm_03"}
     assert s["released_to_watching"] == 1 and s["watching"] == 1
     assert one(ctx.conn, "SELECT COUNT(*) n FROM followups WHERE lead_id='COLD_UNWORKED' AND status='pending'")["n"] == 0
+
+
+def test_payout_list_is_urgent_retention_with_amounts(ctx, tmp_path):
+    from wepipeline.insights import customer_insight
+    from wepipeline.dialer import dialer_queue
+
+    path = tmp_path / "payouts_08oct.csv"
+    pd.DataFrame({"ClientCode": ["PAY1", "PAY2"], "Payout Amount": ["25,000", "4000"], "Payout Date": ["08-10-2026", "07-10-2026"]}).to_csv(path, index=False)
+    # a hot non-payout lead already waiting, to check payouts jump ahead
+    ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, status, category, source, extra, heat_tier, heat_score) VALUES "
+                     "('HOTX','HOTX','open','x','WebEngage activity (t)','{}','hot',95)")
+    s = analyse_upload(ctx, path, uploaded_by="sm_01", list_type="payout")
+    assert (s["clients"], s["assigned"], s["watching"]) == (2, 2, 0)
+    lead = one(ctx.conn, "SELECT * FROM leads WHERE lead_id='PAY1'")
+    assert lead["campaign"] == "payout"
+    fu = one(ctx.conn, "SELECT due_at, reason FROM followups WHERE lead_id='PAY1'")
+    assert fu["due_at"].startswith("2026-10-08T11:30") and fu["reason"].startswith("💸 Payout requested")
+    ins = customer_insight(ctx, lead)
+    assert ins["stage"] == "payout"
+    assert ins["opener"].startswith("I'm calling about the ₹25,000 withdrawal you requested. It's being processed as normal")
+    assert ins["ideas"].split("\n")[0].startswith("• Never delay or discourage the withdrawal")
+    assert "Payout requested of ₹25,000 on 08 Oct" in ins["levers"]
+    assert "\"I need the money\" → respect it" in ins["objection"]
+    agent = lead["assigned_to"]
+    q = dialer_queue(ctx, agent)
+    assert q[0]["campaign"] == "payout"  # payouts are first in the GM's line

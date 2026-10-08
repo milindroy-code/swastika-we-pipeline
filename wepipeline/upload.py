@@ -29,9 +29,10 @@ BATCH_COLUMNS = [
 # What the SM says the list is: sets the category (and so the pitch stage) for customers new to the system.
 # The client database, when reachable, replaces it with the real ageing category.
 LIST_TYPES = {
-    "no_deposit": ("New sign-ups, no deposit yet", "Uploaded list - no deposit yet", ""),
+    "no_deposit": ("New customers without deposit", "Uploaded list - no deposit yet", "new"),
     "reactivation": ("Re-activation customers (only engaged ones go to GMs)", "Uploaded list - re-activation", "reactivation"),
-    "unknown": ("Mixed / not sure (work it out from app activity)", None, ""),
+    "payout": ("Customers doing a payout (retain the funds)", "Uploaded list - payout", "payout"),
+    "unknown": ("Mixed / not sure (work it out from app activity)", None, ""),  # not offered in the dashboard
 }
 TIER_FILL = {"🔥 Hot": "FCDDD9", "🌤️ Warm": "FFF2CC", "❄️ Cold": "E6EFFC"}
 
@@ -52,6 +53,8 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
         ctx.conn.execute(f"UPDATE leads SET campaign=? WHERE lead_id IN ({marks}) AND status='open'", (campaign, *ids))
         ctx.conn.commit()
     released = 0
+    if campaign == "payout":
+        _store_payout_details(ctx, path, ids)
     ageing = {"status": "skipped", "detail": "client database not configured"}
     if use_client_db and available(ctx) and not reachable(ctx):
         ageing = {"status": "unavailable", "detail": "client database not reachable from here (office network / VPN needed)"}
@@ -71,14 +74,16 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
     sync = jobs.sync(ctx)  # heat score, assignment (hot first), system follow-ups, overdue checks
 
     marks = ",".join("?" * len(ids))
+    from .assign import engaged_enough
+
     leads = rows(ctx.conn, f"SELECT lead_id, status, heat_tier, assigned_to, category, campaign FROM leads WHERE lead_id IN ({marks})", ids)
     summary = {
         "file": path.name, "kind": ingest["kind"], "list_type": LIST_TYPES[list_type][0], "clients": len(ids), "new_leads": ingest["new_leads"],
         "already_known": known_before, "ageing": ageing,
         "tiers": dict(Counter(l["heat_tier"] for l in leads if l["status"] == "open")),
         "assigned": sum(1 for l in leads if l["status"] == "open" and l["assigned_to"]),
-        "waiting": sum(1 for l in leads if l["status"] == "open" and not l["assigned_to"] and l["campaign"] != "reactivation"),
-        "watching": sum(1 for l in leads if l["status"] == "open" and not l["assigned_to"] and l["campaign"] == "reactivation"),
+        "waiting": sum(1 for l in leads if l["status"] == "open" and not l["assigned_to"] and engaged_enough(ctx, l)),
+        "watching": sum(1 for l in leads if l["status"] == "open" and not l["assigned_to"] and not engaged_enough(ctx, l)),
         "released_to_watching": released,
         "closed": sum(1 for l in leads if l["status"] != "open"),
         "not_in_client_db": sum(1 for l in leads if l["category"] == "Not found in client DB"),
@@ -91,6 +96,44 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
     summary["upload_id"] = cur.fetchone()["id"]
     ctx.conn.commit()
     return summary
+
+
+PAYOUT_AMOUNT_COLS = ["payout amount", "withdrawal amount", "amount", "payout", "requested amount", "payout amt"]
+PAYOUT_DATE_COLS = ["payout date", "withdrawal date", "request date", "requested on", "date"]
+
+
+def _store_payout_details(ctx: Ctx, path: Path, ids: list[str]) -> None:
+    """Pick up payout amount / date columns when the file has them, for the opener ('the ₹25,000 withdrawal')."""
+    from .context import parse_dt
+    from .ingest import USER_ID_COLS, _find, _read_sheets
+
+    wanted, found = set(ids), {}
+    for df in _read_sheets(path).values():
+        uid = _find(df, "", USER_ID_COLS)
+        amt = _find(df, "", PAYOUT_AMOUNT_COLS)
+        when = _find(df, "", PAYOUT_DATE_COLS)
+        if not uid or not (amt or when):
+            continue
+        for r in df.to_dict("records"):
+            cid = str(r[uid]).strip()
+            if cid not in wanted:
+                continue
+            d = found.setdefault(cid, {})
+            try:
+                if amt and str(r[amt]).strip():
+                    d["payout_amount"] = float(str(r[amt]).replace(",", "").replace("₹", ""))
+            except ValueError:
+                pass
+            dt = parse_dt(r[when], ctx.tz) if when else None
+            if dt:
+                d["payout_date"] = iso(dt)
+    for cid, d in found.items():
+        lead = one(ctx.conn, "SELECT extra FROM leads WHERE lead_id=?", (cid,))
+        if lead:
+            extra = json.loads(lead["extra"] or "{}")
+            extra.update(d)
+            ctx.conn.execute("UPDATE leads SET extra=? WHERE lead_id=?", (json.dumps(extra), cid))
+    ctx.conn.commit()
 
 
 def list_uploads(ctx: Ctx, limit: int = 20) -> list[dict]:

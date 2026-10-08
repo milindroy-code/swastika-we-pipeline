@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from .activity import humanize_ago, summarize
 from . import sarthi
@@ -50,6 +51,16 @@ PLAYBOOKS = {
             "Offer a quick walkthrough of tools such as alerts, screeners and the research desk",
         ],
     },
+    "payout": {
+        "goal": "Keep the relationship (and part of the funds, if they choose) while the payout goes through",
+        "opener": "I'm calling about the withdrawal you requested. It's being processed as normal; I just wanted to check "
+                  "everything is okay with your account.",
+        "points": [
+            "Never delay or discourage the withdrawal; confirm it is being processed",
+            "Ask what made them withdraw: charges, losses, not sure what to trade, needs the money, moving broker",
+            "Offer what fits: pricing, Sarthi ideas with stop-loss, or a dedicated RM",
+        ],
+    },
     "active_trader": {
         "goal": "Deepen engagement (more segments, higher activity)",
         "opener": "Thanks for trading with us. I wanted to check whether you're getting everything you need.",
@@ -63,6 +74,22 @@ PLAYBOOKS = {
 
 SEGMENT_LABELS = {"equity_research": "Equity", "fando_research": "F&O", "commodity_research": "Commodity",
                   "master research": "Research home"}
+
+
+def segment_label(raw: str | None) -> str | None:
+    """Sheet names vary between exports ('equity_research', 'equityresearch', 'F&O research', 'master research')."""
+    if not raw:
+        return None
+    key = re.sub(r"[^a-z&]", "", str(raw).lower())
+    if "fando" in key or "fno" in key or "f&o" in key or "derivative" in key:
+        return "F&O"
+    if "commod" in key or "mcx" in key:
+        return "Commodity"
+    if "equity" in key or "cash" in key:
+        return "Equity"
+    if "master" in key or "landing" in key or "home" in key:
+        return "Research home"
+    return SEGMENT_LABELS.get(raw, raw)
 
 COMPLIANCE = "Do not recommend specific buy/sell actions or promise returns. Share market information as context only."
 
@@ -111,7 +138,7 @@ def activity_hooks(ctx: Ctx, summary: dict) -> list[str]:
         hooks.append(f"Accepted {sig['research_call_accepted']['count']} research call(s) in the app "
                      f"(last {humanize_ago(ctx, sig['research_call_accepted']['last'])}): they want to act on research")
     if summary.get("segments"):
-        labels = [SEGMENT_LABELS.get(seg, seg) for seg in summary["segments"]]
+        labels = [segment_label(seg) for seg in summary["segments"]]
         hooks.append("Browsing research for: " + ", ".join(labels) + ". Lead with that segment")
     if "kyc_started" in sig and "kyc_complete" not in sig:
         hooks.append("Started KYC but has not completed it")
@@ -184,7 +211,7 @@ def _ai_inputs(ctx: Ctx, lead: dict, summary: dict) -> dict:
         "offers": ctx.cfg.get("offers") or {},
         "hero_feature": {"name": sarthi.name(ctx),
                          "track_record": sarthi.track_line(ctx, (summary.get("segments") or [None])[0] and
-                                                           SEGMENT_LABELS.get(summary["segments"][0])),
+                                                           segment_label(summary["segments"][0])),
                          "disclaimer": sarthi.track(ctx)["disclaimer"]},
     }
 

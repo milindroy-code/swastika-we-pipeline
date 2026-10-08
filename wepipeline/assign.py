@@ -38,6 +38,10 @@ def first_followup(ctx: Ctx, lead: dict):
     if hints.get("last_call_status", "").strip().lower() in npc_statuses and last_call:
         retry = last_call + timedelta(hours=ctx.rules.get("npc_retry_hours", 4))
         return ctx.roll_to_working_hours(max(retry, now)), "npc_retry", "NPC recorded in sheet: retry"
+    if lead.get("campaign") == "payout":  # money is leaving: call fast, whatever the heat score
+        minutes = int((ctx.cfg.get("payout") or {}).get("first_call_minutes", 30))
+        return (ctx.roll_to_working_hours(ctx.roll_to_working_hours(now) + timedelta(minutes=minutes)), "first_call",
+                "💸 Payout requested: call before the funds leave")
     tier = lead.get("heat_tier") or "cold"
     reason = f"🔥 Hot new lead: {lead['heat_reasons']}" if tier == "hot" and lead.get("heat_reasons") else "New lead: introduce yourself"
     due = ctx.roll_to_working_hours(ctx.roll_to_working_hours(now) + first_call_sla(ctx, tier))
@@ -49,6 +53,53 @@ def engaged_enough(ctx: Ctx, lead: dict) -> bool:
     if lead.get("campaign") != "reactivation":
         return True
     return (lead.get("heat_tier") or "cold") in set((ctx.cfg.get("reactivation") or {}).get("assign_tiers", ["hot", "warm"]))
+
+
+PRIORITY_SQL = ("CASE WHEN campaign='payout' THEN 0 WHEN heat_tier='hot' THEN 1 WHEN heat_tier='warm' THEN 2 ELSE 3 END")
+
+
+def minutes_per_call(ctx: Ctx) -> int:
+    return int(ctx.rules.get("minutes_per_call", 5))
+
+
+def _unworked(ctx: Ctx, lead_id: str) -> bool:
+    """No call logged and nothing pending except the automatic first call / system follow-up."""
+    from .db import one
+
+    return not (one(ctx.conn, "SELECT 1 FROM calls WHERE lead_id=? LIMIT 1", (lead_id,)) or one(
+        ctx.conn, "SELECT 1 FROM followups WHERE lead_id=? AND status='pending' AND kind NOT IN ('first_call','system') LIMIT 1",
+        (lead_id,)))
+
+
+def _release(ctx: Ctx, lead_id: str, why: str) -> None:
+    # the lead leaves the GM's queue, so warnings / escalations about it are no longer theirs to answer
+    ctx.conn.execute("DELETE FROM alerts WHERE followup_id IN (SELECT id FROM followups WHERE lead_id=? AND status='pending')", (lead_id,))
+    ctx.conn.execute("UPDATE followups SET status='cancelled', completed_at=?, reason=COALESCE(reason,'') || ? "
+                     "WHERE lead_id=? AND status='pending'", (iso(ctx.now()), f" (released: {why})", lead_id))
+    ctx.conn.execute("UPDATE leads SET assigned_to=NULL, assigned_at=NULL WHERE lead_id=?", (lead_id,))
+
+
+def rebalance(ctx: Ctx) -> int:
+    """When GMs are full and engaged leads (🔥 / 🌤️ / payout) are waiting, swap them in for unworked ❄️ cold leads.
+    Cold leads a GM has called or promised a callback stay where they are."""
+    load, cap = open_load(ctx), {m["id"]: m.get("capacity", 50) for m in ctx.callers()}
+    free = sum(max(cap[g] - load.get(g, 0), 0) for g in cap)
+    waiting = [l for l in rows(ctx.conn, "SELECT * FROM leads WHERE status='open' AND assigned_to IS NULL "
+                                         "AND (campaign='payout' OR heat_tier IN ('hot','warm')) "
+                                         f"ORDER BY {PRIORITY_SQL}, heat_score DESC") if engaged_enough(ctx, l)]
+    need = max(len(waiting) - free, 0)
+    if not need:
+        return 0
+    released = 0
+    for lead in rows(ctx.conn, "SELECT lead_id FROM leads WHERE status='open' AND assigned_to IS NOT NULL "
+                               "AND heat_tier='cold' AND campaign<>'payout' ORDER BY heat_score, assigned_at DESC"):
+        if released >= need:
+            break
+        if _unworked(ctx, lead["lead_id"]):
+            _release(ctx, lead["lead_id"], "swapped out for an engaged lead")
+            released += 1
+    ctx.conn.commit()
+    return released
 
 
 def release_unengaged_reactivation(ctx: Ctx, lead_ids: list[str] | None = None) -> int:
@@ -63,14 +114,9 @@ def release_unengaged_reactivation(ctx: Ctx, lead_ids: list[str] | None = None) 
                                f"AND assigned_to IS NOT NULL{only}", tuple(lead_ids or ())):
         if (lead["heat_tier"] or "cold") in allowed:
             continue
-        worked = one(ctx.conn, "SELECT 1 FROM calls WHERE lead_id=? LIMIT 1", (lead["lead_id"],)) or one(
-            ctx.conn, "SELECT 1 FROM followups WHERE lead_id=? AND status='pending' AND kind NOT IN ('first_call','system') LIMIT 1",
-            (lead["lead_id"],))
-        if worked:
+        if not _unworked(ctx, lead["lead_id"]):
             continue  # a GM has spoken to them or promised a callback: keep it with that GM
-        ctx.conn.execute("UPDATE followups SET status='cancelled', completed_at=?, reason=COALESCE(reason,'') || ' (released: re-activation, not engaged)' "
-                         "WHERE lead_id=? AND status='pending'", (iso(ctx.now()), lead["lead_id"]))
-        ctx.conn.execute("UPDATE leads SET assigned_to=NULL, assigned_at=NULL WHERE lead_id=?", (lead["lead_id"],))
+        _release(ctx, lead["lead_id"], "re-activation, not engaged")
         released += 1
     ctx.conn.commit()
     return released
@@ -81,9 +127,11 @@ def assign_new_leads(ctx: Ctx) -> dict:
 
     load = open_load(ctx)
     assigned, hot, unassigned, watching = {}, {}, 0, 0
+    pace = timedelta(minutes=minutes_per_call(ctx))
+    slot = {}  # per GM: the next free first-call slot in this run
     # Hottest leads first, so they get a caller even when capacity runs out.
     for lead in rows(ctx.conn, "SELECT * FROM leads WHERE assigned_to IS NULL AND status='open' "
-                               "ORDER BY heat_score DESC, first_seen_at, lead_id"):
+                               f"ORDER BY {PRIORITY_SQL}, heat_score DESC, first_seen_at, lead_id"):
         if not engaged_enough(ctx, lead):
             watching += 1  # held back until their app activity makes them warm or hot
             continue
@@ -93,7 +141,12 @@ def assign_new_leads(ctx: Ctx) -> dict:
             continue
         ctx.conn.execute("UPDATE leads SET assigned_to=?, assigned_at=? WHERE lead_id=?", (caller, iso(ctx.now()), lead["lead_id"]))
         load[caller] = load.get(caller, 0) + 1
-        add_followup(ctx, lead["lead_id"], caller, *first_followup(ctx, lead))
+        due, kind, reason = first_followup(ctx, lead)
+        if kind == "first_call":  # many leads at once: space them at a realistic pace, highest priority first
+            start = slot.get(caller) or ctx.roll_to_working_hours(ctx.now())
+            due = ctx.roll_to_working_hours(max(due, start))
+            slot[caller] = due + pace
+        add_followup(ctx, lead["lead_id"], caller, due, kind, reason)
         assigned[caller] = assigned.get(caller, 0) + 1
         if lead["heat_tier"] == "hot":
             hot[caller] = hot.get(caller, 0) + 1
@@ -114,3 +167,34 @@ def assign_new_leads(ctx: Ctx) -> dict:
                    once_per_day=True)
     return {"assigned": sum(assigned.values()), "hot": sum(hot.values()), "by_caller": assigned, "unassigned": unassigned,
             "watching_reactivation": watching}
+
+
+def go_live_reset(ctx: Ctx) -> dict:
+    """Start the calling day clean: re-time every unworked first call / system follow-up that is overdue or due today,
+    per GM in priority order (payout, 🔥, 🌤️, ❄️) at the GM's pace, and clear the warnings and escalations those
+    follow-ups produced (they were not real misses: nobody was calling yet). Worked follow-ups are not touched."""
+    now = ctx.now()
+    start = ctx.roll_to_working_hours(now + timedelta(minutes=2))
+    end_of_day = iso(ctx.day_end(start.date()))
+    pace = timedelta(minutes=minutes_per_call(ctx))
+    moved = cleared = 0
+    for gm in ctx.callers():
+        items = rows(ctx.conn, f"""SELECT f.id, f.lead_id FROM followups f JOIN leads l ON l.lead_id = f.lead_id
+                                   WHERE f.agent_id=? AND f.status='pending' AND l.status='open'
+                                     AND f.kind IN ('first_call','system') AND f.due_at <= ?
+                                   ORDER BY {PRIORITY_SQL.replace("campaign", "l.campaign").replace("heat_tier", "l.heat_tier")},
+                                            l.heat_score DESC, f.due_at""", (gm["id"], end_of_day))
+        due = start
+        for it in items:
+            if not _unworked(ctx, it["lead_id"]):
+                continue
+            ctx.conn.execute("UPDATE followups SET due_at=?, warned_at=NULL, escalated_at=NULL, missed=0 WHERE id=?",
+                             (iso(due), it["id"]))
+            cleared += ctx.conn.execute("DELETE FROM alerts WHERE followup_id=?", (it["id"],)).rowcount
+            moved += 1
+            due = ctx.roll_to_working_hours(due + pace)
+    # alerts left behind by follow-ups that were released (cancelled) before any call: not real misses either
+    cleared += ctx.conn.execute("""DELETE FROM alerts WHERE followup_id IN (SELECT id FROM followups
+                                   WHERE status='cancelled' AND reason LIKE '%(released:%')""").rowcount
+    ctx.conn.commit()
+    return {"retimed": moved, "false_alerts_cleared": cleared, "first_call_at": iso(start)}

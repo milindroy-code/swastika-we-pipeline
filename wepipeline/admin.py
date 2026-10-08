@@ -46,7 +46,7 @@ def save_rules(ctx: Ctx, values: dict, sla: dict[str, int]) -> dict:
         raise ValueError("The escalation time must be later than the warning time")
     for tier, minutes in sla.items():
         if not 5 <= int(minutes) <= 1440:
-            raise ValueError(f"First call for {SLA_TIERS[tier]} leads: must be between 5 and 1440 minutes")
+            raise ValueError(f"First call for {SLA_TIERS[tier]} clients: must be between 5 and 1440 minutes")
     clean["first_call_sla_by_tier"] = {t: int(m) for t, m in sla.items()}
     set_setting(ctx.conn, "rules", json.dumps(clean), iso(ctx.now()))
     ctx.clear_rules_cache()

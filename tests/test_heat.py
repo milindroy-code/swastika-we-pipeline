@@ -119,4 +119,4 @@ def test_lead_turning_hot_is_pulled_forward(loaded):
     pending = rows(ctx.conn, "SELECT * FROM followups WHERE lead_id='COLD1' AND status='pending' ORDER BY due_at")
     assert pending[0]["kind"] == "system" and "Turned hot" in pending[0]["reason"]
     assert parse_dt(pending[0]["due_at"], TZ) == ctx.now()
-    assert one(ctx.conn, "SELECT 1 FROM notifications WHERE recipient=? AND subject LIKE '%Hot lead%'", (lead["assigned_to"],))
+    assert one(ctx.conn, "SELECT 1 FROM notifications WHERE recipient=? AND subject LIKE '%Hot client%'", (lead["assigned_to"],))

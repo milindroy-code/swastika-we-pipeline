@@ -118,7 +118,7 @@ def refresh_heat(ctx: Ctx) -> dict:
                 if not pending or min(parse_dt(p["due_at"], ctx.tz) for p in pending) > window:
                     add_followup(ctx, lead["lead_id"], lead["assigned_to"], ctx.roll_to_working_hours(now), "system",
                                  f"🔥 Turned hot (score {value:.0f}): {describe(parts[0])}")
-                notify(ctx, lead["assigned_to"], "info", f"🔥 Hot lead: {lead['name'] or lead['lead_id']}",
+                notify(ctx, lead["assigned_to"], "info", f"🔥 Hot client: {lead['name'] or lead['lead_id']}",
                        f"{lead['name'] or lead['lead_id']} turned hot (score {value:.0f}). {reasons}. Call them first.")
     ctx.conn.commit()
     return {**counts, "became_hot": len(became_hot)}

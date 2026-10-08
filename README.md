@@ -1,6 +1,6 @@
 # Growth follow-up pipeline
 
-Turns WebEngage app activity, new no-deposit clients from the back office, and the live lead sheet into a prioritised
+Turns WebEngage app activity, new no-deposit clients from the back office, and the live client sheet into a prioritised
 calling queue. It enforces follow-up time limits and reports compliance.
 
 **Roles:** **GMs** (Growth Managers) do the calling and work their queue. **SMs** (Service Managers) mentor their GMs,
@@ -11,7 +11,7 @@ To host it for the team for free, see **[DEPLOY.md](DEPLOY.md)**.
 ```
 WebEngage exports ───┐                         ┌─> GM queue (hot first) ─> call logged ─> next follow-up scheduled
 Client DB (no FTD) ───┼─> heat score ─> assign ─┤
-Lead sheet ───────────┘   (0-100)               └─> overdue? warn GM (15 min) ─> escalate to SM (60 min) ─> EOD misses
+Client sheet ───────────┘   (0-100)               └─> overdue? warn GM (15 min) ─> escalate to SM (60 min) ─> EOD misses
 ```
 
 ## Run it
@@ -34,7 +34,7 @@ Other commands: `python run.py morning` / `python run.py eod` send those notes i
 |---|---|---|
 | New clients with no first deposit | back-office SQL Server, `sources.client_db` | `python run.py pull-clients` (office network only). Registered in the last 30 days and bucketed 0–7 / 8–15 / 16–30 days. Clients who deposit are closed automatically. |
 | WebEngage exports | drop `.xlsx` / `.csv` into `data/webengage/`, or upload on **Data & admin** | Each file is loaded once, then again only if it changes. Every sheet of a workbook is read. |
-| Lead sheet | `sources.leads` in `config.yaml` | Local CSV/XLSX, a published Google Sheet CSV link, or a private sheet via service account. Optional: leads can come only from activity files. |
+| Client sheet | `sources.leads` in `config.yaml` | Local CSV/XLSX, a published Google Sheet CSV link, or a private sheet via service account. Optional: clients can come only from activity files. |
 | Market notes | `data/market_notes.md` (or **Data & admin** page) | One talking point per line, used in pitches and the morning note. Update it every morning. |
 
 Recognised WebEngage shapes:
@@ -44,9 +44,9 @@ Recognised WebEngage shapes:
   (equity / F&O / commodity research), the sheet name keeps them apart.
 - **Activity list**: user id, activity, count and/or last-done date or "days since", optional `Activity Type` (Core / Non-Core).
 - **Event-level export**: user id, event name, event time.
-- **User export**: user id plus phone/email, used to match leads to WebEngage users.
+- **User export**: user id plus phone/email, used to match clients to WebEngage users.
 
-Users in an activity file who are not in the lead sheet become leads, keyed by ClientCode. Their category comes from
+Users in an activity file who are not in the client sheet become clients, keyed by ClientCode. Their category comes from
 `sources.webengage.file_categories`, which matches part of the file name.
 
 ## Heat score and priority
@@ -54,7 +54,7 @@ Users in an activity file who are not in the lead sheet become leads, keyed by C
 For each activity a user did in the last 30 days:
 
 Registration counts as a core activity (`REGISTERED`), so a client who signed up today scores higher than one from three weeks ago.
-Registration alone stays ❄️ cold (about 25). It takes app activity on top to make a lead warm or hot.
+Registration alone stays ❄️ cold (about 25). It takes app activity on top to make a client warm or hot.
 
 ```
 points = weight × recency × frequency
@@ -66,11 +66,11 @@ score = 100 × (1 − e^(−Σpoints ÷ 35))            → 0-100
 
 | Tier | Score | First call within | Where it shows |
 |---|---|---|---|
-| 🔥 Hot | ≥ 70 | 30 min | Assigned first, top of every queue, highlighted in the morning note, "Hot leads not called yet" table for managers |
-| 🌤️ Warm | 40–69 | 2 h | After hot leads |
+| 🔥 Hot | ≥ 70 | 30 min | Assigned first, top of every queue, highlighted in the morning note, "Hot clients not called yet" table for managers |
+| 🌤️ Warm | 40–69 | 2 h | After hot clients |
 | ❄️ Cold | < 40 | 4 h | Last |
 
-Scores are recalculated on every sync. When a lead **turns hot**, its follow-up is pulled forward to now and the caller is notified.
+Scores are recalculated on every sync. When a client **turns hot**, its follow-up is pulled forward to now and the caller is notified.
 All weights, tiers and SLAs live under `heat:` in `config.yaml`. The scale of 35 was tuned on the 4–7 Oct file, giving about 17% hot.
 
 Core activities are currently `ORDER_PLACED_MOB`, `CALL_ACCEPTED_MOB` and `RECOMMENDATION_LISTING_OPENED_MOB`.
@@ -98,7 +98,7 @@ deposit amount, and reports count **Funded ≥ ₹30k**.
 
 ## Sarthi in every pitch
 
-Sarthi (ready trade ideas with entry, target and stop-loss in equity, F&O and commodities) leads every pitch.
+Sarthi (ready trade ideas with entry, target and stop-loss in equity, F&O and commodities) clients every pitch.
 It is matched to the customer's segment (from app activity or `PreferredSegment`), and Sarthi activation comes from
 `IsSarthiTIOn`. The goal of the call is funds in the account: "add funds now so you're ready for Sarthi's next idea",
 using `sarthi.starter_amount` when set.
@@ -116,10 +116,10 @@ test enforces it. Have compliance approve the wording before go-live.
 On **Customer list → 📤 Analyse a new list**, an SM uploads an Excel/CSV: a WebEngage event export (one sheet per
 event) or just a column of client codes. They say what the list is (new sign-ups with no deposit, clients to
 re-activate, or mixed). The system then:
-1. Reads every sheet, skips totals rows such as "Others", creates leads for new client codes and loads their activity.
+1. Reads every sheet, skips totals rows such as "Others", creates clients for new client codes and loads their activity.
 2. Looks each client up in the client database when it's reachable (office network). A 3-second check skips it
    otherwise, and the list type sets the pitch instead.
-3. Scores, ranks and assigns hot leads first within GM capacity, and builds every customer's opener, levers and pitch.
+3. Scores, ranks and assigns hot clients first within GM capacity, and builds every customer's opener, levers and pitch.
 4. Shows the results for that file (rank, priority, GM, first-call time, why, opener) and offers the analysed list as Excel.
 
 Every upload is kept, so earlier lists can be reopened from "Results for".
@@ -127,14 +127,14 @@ Every upload is kept, so earlier lists can be reopened from "Results for".
 **Re-activation lists** (choose "Re-activation customers"): every customer in the file is tagged "Re-activation", new or
 already known. Only those whose app activity makes them 🔥/🌤️ (`reactivation.assign_tiers`) go to GMs. The rest wait in a
 **watching** pool and are assigned automatically the moment they engage. Cold re-activation customers no GM has worked
-yet (no call, no promised callback or NPC retry) are taken out of GM queues, freeing capacity for engaged leads.
-Customer list and Leads have a **List** filter.
+yet (no call, no promised callback or NPC retry) are taken out of GM queues, freeing capacity for engaged clients.
+Customer list and Clients have a **List** filter.
 
-## Client ageing (every lead)
+## Client ageing (every client)
 
-`python run.py pull-clients` looks up **every** lead, from any source, in the back-office client tables. It reads the
+`python run.py pull-clients` looks up **every** client, from any source, in the back-office client tables. It reads the
 registration date, first deposit, first and last trade (`FTD`, `LTD`), holdings and account status, then gives each
-lead one category, which also sets the pitch stage:
+client one category, which also sets the pitch stage:
 
 | Category | Rule | Pitch stage |
 |---|---|---|
@@ -145,7 +145,7 @@ lead one category, which also sets the pitch stage:
 | Traded - active (last 30 days) | traded recently | deepen engagement |
 | Not found in client DB | id not in `tbl_ClientNew` | from app activity |
 
-Closed accounts are dropped. WebEngage's "Others" total row is ignored. A deposit closes only leads in the no-deposit categories.
+Closed accounts are dropped. WebEngage's "Others" total row is ignored. A deposit closes only clients in the no-deposit categories.
 
 ## Live market notes
 
@@ -171,7 +171,7 @@ SMs can add their own notes on **Data & admin**, which appear first. The page al
 Streamlit Cloud it goes in the app's Secrets. Four sections:
 - **Follow-up rules:** NPC retry hours, warning and escalation minutes, first-call times per priority.
 - **👥 Team:** the real GMs and SMs, who reports to whom, capacity, email, category focus, active. Leave ID blank for
-  new people. Removing or deactivating a GM moves their leads, with pending follow-ups and promised callbacks, to the
+  new people. Removing or deactivating a GM moves their clients, with pending follow-ups and promised callbacks, to the
   other GMs. This overrides `team:` in config.yaml.
 - **🗓️ Hourly routine:** the GM's day plan (start time, what the hour is for, nudge on or off). This overrides `day_structure:`.
 - **Sarthi track record:** pull from the research database, plus approved examples and the disclaimer.
@@ -180,7 +180,7 @@ Team and routine are stored in the database, so changes apply straight away with
 
 ## Hourly routine
 
-Working hours run 10:00–18:30. `day_structure` in `config.yaml` sets the GM's hour-by-hour plan: huddle, hot leads,
+Working hours run 10:00–18:30. `day_structure` in `config.yaml` sets the GM's hour-by-hour plan: huddle, hot clients,
 fresh sign-ups, lunch, NPC round 1, app-activity follow-ups, re-activation, NPC round 2 / evening callbacks, wrap-up.
 At the start of each block every GM gets a nudge with their live counts (overdue, due this hour, hot), and **My day**
 shows the current block. When working hours change, pending follow-ups that now fall outside them move to the next working start.
@@ -202,14 +202,14 @@ GMs see them under "⏱️ Your follow-up time limits" but cannot change them. A
 
 | Event | What the system does |
 |---|---|
-| New lead | Assigned to a GM (category specialist first, else the least-loaded by capacity), with a first call due per its heat tier |
-| Not picked up / busy / switched off | Lead resurfaces **X h later** (admin setting, default 4); after hours it rolls to the next working morning. 6 consecutive NPCs → unreachable, manager informed |
+| New client | Assigned to a GM (category specialist first, else the least-loaded by capacity), with a first call due per its heat tier |
+| Not picked up / busy / switched off | Client resurfaces **X h later** (admin setting, default 4); after hours it rolls to the next working morning. 6 consecutive NPCs → unreachable, manager informed |
 | Customer asks for a callback | Caller enters the time and it becomes a promised follow-up |
 | App activity after the last contact (deposit failed, order abandoned…) | System follow-up created (`triggers:`) |
 | No contact for 3 days | System follow-up to re-engage |
 | Follow-up overdue 15 min | Warning to the GM (dashboard, plus email/webhook if configured) |
 | Overdue 60 min | Escalated to the GM's SM and counted as **missed**, even if called later |
-| Sheet row changes | Lead details update; workflow state is kept; a new "Next Follow-up" time in the sheet becomes a promised follow-up |
+| Sheet row changes | Client details update; workflow state is kept; a new "Next Follow-up" time in the sheet becomes a promised follow-up |
 
 Compliance per caller per day = on-time follow-ups ÷ follow-ups due. The EOD report lists every miss.
 
@@ -221,8 +221,8 @@ Google Chat, set `notifications.webhook_url`. Team members' emails go in `team:`
 
 ## AI pitches (optional)
 
-Each lead has a rule-based pitch built from its stage, app activity and market notes. With Anthropic credentials
-(`ANTHROPIC_API_KEY`), the **AI pitch** tab writes a tailored one with Claude. Only the lead's first name, category,
+Each client has a rule-based pitch built from its stage, app activity and market notes. With Anthropic credentials
+(`ANTHROPIC_API_KEY`), the **AI pitch** tab writes a tailored one with Claude. Only the client's first name, category,
 activity and call notes are sent: no phone number, email or client code. The prompt forbids security-specific
 recommendations and return promises.
 

@@ -43,7 +43,7 @@ def first_followup(ctx: Ctx, lead: dict):
         return (ctx.roll_to_working_hours(ctx.roll_to_working_hours(now) + timedelta(minutes=minutes)), "first_call",
                 "💸 Payout requested: call before the funds leave")
     tier = lead.get("heat_tier") or "cold"
-    reason = f"🔥 Hot new lead: {lead['heat_reasons']}" if tier == "hot" and lead.get("heat_reasons") else "New lead: introduce yourself"
+    reason = f"🔥 Hot new client: {lead['heat_reasons']}" if tier == "hot" and lead.get("heat_reasons") else "New client: introduce yourself"
     due = ctx.roll_to_working_hours(ctx.roll_to_working_hours(now) + first_call_sla(ctx, tier))
     return due, "first_call", reason
 
@@ -96,7 +96,7 @@ def rebalance(ctx: Ctx) -> int:
         if released >= need:
             break
         if _unworked(ctx, lead["lead_id"]):
-            _release(ctx, lead["lead_id"], "swapped out for an engaged lead")
+            _release(ctx, lead["lead_id"], "swapped out for an engaged client")
             released += 1
     ctx.conn.commit()
     return released
@@ -155,15 +155,15 @@ def assign_new_leads(ctx: Ctx) -> dict:
     hot_minutes = int(first_call_sla(ctx, "hot").total_seconds() // 60)
     for caller, n in assigned.items():
         h = hot.get(caller, 0)
-        subject = f"{n} new lead(s) assigned to you" + (f" · 🔥 {h} hot" if h else "")
-        body = f"{n} new lead(s) were added to your queue."
+        subject = f"{n} new client(s) assigned to you" + (f" · 🔥 {h} hot" if h else "")
+        body = f"{n} new client(s) were added to your queue."
         if h:
             body += f" {h} are 🔥 hot: call them within {hot_minutes} minutes. They are at the top of your queue."
         notify(ctx, caller, "info", subject, body)
     if unassigned:
         for m in ctx.managers():
-            notify(ctx, m["id"], "info", "Leads waiting for capacity",
-                   f"{unassigned} lead(s) could not be assigned because every GM is at capacity.",
+            notify(ctx, m["id"], "info", "Clients waiting for capacity",
+                   f"{unassigned} client(s) could not be assigned because every GM is at capacity.",
                    once_per_day=True)
     return {"assigned": sum(assigned.values()), "hot": sum(hot.values()), "by_caller": assigned, "unassigned": unassigned,
             "watching_reactivation": watching}

@@ -24,7 +24,7 @@ BATCH_COLUMNS = [
     ("Last trade date", "last_trade_date"), ("Core activity (type × times, recency)", "core_detail"),
     ("Non-core activity", "non_core_detail"), ("Best time to call", "best_time"), ("Research segments", "segments"), ("Sarthi status", "sarthi_status"),
     ("Why hot (score drivers)", "heat_reasons"), ("Engagement levers", "levers"),
-    ("Call ideas (data → angle)", "call_ideas_text"), ("Close", "closing_text"), ("Agar customer bole", "objections_hi"), ("Lead status", "status"),
+    ("Call ideas (data → angle)", "call_ideas_text"), ("Close", "closing_text"), ("Agar customer bole", "objections_hi"), ("Client status", "status"),
 ]
 # What the SM says the list is: sets the category (and so the pitch stage) for customers new to the system.
 # The client database, when reachable, replaces it with the real ageing category.
@@ -72,7 +72,7 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
     elif use_client_db and available(ctx):
         try:
             res = enrich_leads(ctx)
-            ageing = {"status": "ok", "detail": f"{res.get('found', 0)} of {res.get('looked_up', 0)} open leads found in the client database"}
+            ageing = {"status": "ok", "detail": f"{res.get('found', 0)} of {res.get('looked_up', 0)} open clients found in the client database"}
         except Exception as e:  # unreachable from the cloud, wrong password, VPN down...
             log.warning("Client DB ageing skipped: %s", e)
             ageing = {"status": "unavailable", "detail": f"client database not reachable from here ({type(e).__name__})"}

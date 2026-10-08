@@ -3,7 +3,7 @@
 | Piece | Runs on | Cost |
 |---|---|---|
 | Dashboard (GMs log calls, SMs track compliance) | Streamlit Community Cloud | Free |
-| Database (leads, calls, follow-ups, alerts) | Neon Postgres | Free: 0.5 GB, about 100× what this needs |
+| Database (clients, calls, follow-ups, alerts) | Neon Postgres | Free: 0.5 GB, about 100× what this needs |
 | Scheduler: sync, heat score, assignment, warnings and escalations, morning and EOD notes | GitHub Actions, every 15 min, 10:00–19:15 IST, Mon–Fri | Free: about 900 of the 2,000 free minutes a month |
 | Pull of new no-deposit clients from the back-office SQL Server | An always-on office PC (Task Scheduler, hourly) | Free |
 | Live Google Sheet: every customer with score, levers and pitch | Google Sheets, written by the scheduler hourly | Free |
@@ -22,7 +22,7 @@ Allow about 30 minutes. You need a GitHub account and an email address for Neon 
    If your compliance team needs data closer to India, pick **AWS Asia Pacific (Singapore)**; the dashboard will be slower.
 3. On the project page click **Connect**, then copy the connection string. It looks like
    `postgresql://neondb_owner:...@ep-....aws.neon.tech/neondb?sslmode=require`.
-   **This string is the password to all lead data.** Keep it private and only paste it into the secret fields below.
+   **This string is the password to all client data.** Keep it private and only paste it into the secret fields below.
 
 The tables are created automatically the first time the app connects.
 
@@ -65,7 +65,7 @@ The tables are created automatically the first time the app connects.
 
 1. Open the app and pick an **SM** in the sidebar.
 2. **Data & admin**: upload the WebEngage export (for example `user_auth_after_4octandnot_added_fund.xlsx`).
-   Leads are created, scored and assigned straight away.
+   Clients are created, scored and assigned straight away.
 3. **Admin: rules**: unlock with the `ADMIN_PIN`. Set the not-picked-up retry hours, warning and escalation minutes,
    and first-call times per priority. GMs see these limits but can't change them.
 4. **Data & admin → Today's market notes**: add a few talking points (repeat every morning).

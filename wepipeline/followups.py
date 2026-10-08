@@ -62,7 +62,7 @@ def log_call(
         next_at = None  # the retry time is the admin's rule; GMs cannot pick their own for an NPC
     lead = one(ctx.conn, "SELECT * FROM leads WHERE lead_id=?", (lead_id,))
     if not lead:
-        raise ValueError(f"Unknown lead {lead_id}")
+        raise ValueError(f"Unknown client {lead_id}")
 
     now = ctx.now()
     call_id = ctx.conn.execute(

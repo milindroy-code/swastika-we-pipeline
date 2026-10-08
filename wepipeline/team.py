@@ -45,7 +45,7 @@ def validate_team(members: list[dict]) -> list[dict]:
             except ValueError:
                 raise ValueError(f"{name}: capacity must be a number") from None
             if not 1 <= cap <= 1000:
-                raise ValueError(f"{name}: capacity must be between 1 and 1000 open leads")
+                raise ValueError(f"{name}: capacity must be between 1 and 1000 open clients")
             entry.update(capacity=cap, sm=str(m.get("sm") or "").strip())
             cats = str(m.get("categories") or "").strip()
             if cats:

@@ -76,18 +76,18 @@ me_id = st.sidebar.selectbox("You are", list(labels), format_func=labels.get)
 me = ctx.member(me_id)
 is_manager = ctx.is_sm(me)
 
-pages = (["Team compliance", "Customer list", "Escalations", "Leads", "GM view", "Reports", "Data & admin", "Admin: rules", "Notifications"]
-         if is_manager else ["📞 Call now", "My leads", "Notifications"])
+pages = (["Team compliance", "Customer list", "Escalations", "Clients", "GM view", "Reports", "Data & admin", "Admin: rules", "Notifications"]
+         if is_manager else ["📞 Call now", "My clients", "Notifications"])
 page = st.sidebar.radio("Page", pages)
 
-if st.sidebar.button("Sync now", width="stretch", help="Pull the lead sheet and WebEngage exports, assign leads, check follow-ups"):
+if st.sidebar.button("Sync now", width="stretch", help="Pull the client sheet and WebEngage exports, assign clients, check follow-ups"):
     with st.spinner("Syncing…"):
         st.session_state["last_sync"] = jobs.sync(ctx)
 if st.sidebar.button("Refresh", width="stretch"):
     st.rerun()
 if "last_sync" in st.session_state:
     s = st.session_state["last_sync"]
-    st.sidebar.caption(f"Last sync: {s['leads'].get('new', 0)} new leads · {s['assignment']['assigned']} assigned · "
+    st.sidebar.caption(f"Last sync: {s['leads'].get('new', 0)} new clients · {s['assignment']['assigned']} assigned · "
                        f"{s['system_followups']} system follow-ups · {s['overdue']['escalated']} escalations")
 st.sidebar.caption(f"Now: {ctx.now():%a %d %b %H:%M}")
 
@@ -105,8 +105,8 @@ def call_form(lead: dict, agent_id: str, key: str) -> None:
             attempts_left = rules.get("max_npc_attempts", 6) - lead["npc_count"] - 1
             st.info(f"⏱️ Next attempt is set automatically for **{retry:%a %d %b %H:%M}** "
                     f"({rules.get('npc_retry_hours', 4):g} h rule set by admin). "
-                    + (f"{attempts_left} attempt(s) left before the lead is marked unreachable." if attempts_left > 0
-                       else "This is the last attempt: the lead will be marked unreachable."))
+                    + (f"{attempts_left} attempt(s) left before the client is marked unreachable." if attempts_left > 0
+                       else "This is the last attempt: the client will be marked unreachable."))
         elif not spec.get("status"):  # open outcomes can carry a promised time
             required = spec.get("needs_time")
             schedule = required or st.checkbox("I promised a follow-up at a specific time", key=f"{key}_c")
@@ -125,7 +125,7 @@ def call_form(lead: dict, agent_id: str, key: str) -> None:
             except ValueError as e:
                 st.error(str(e))
                 return
-            st.toast(f"Saved. Next follow-up: {fmt(res['next_due']) or 'none'} · lead status: {res['status']}")
+            st.toast(f"Saved. Next follow-up: {fmt(res['next_due']) or 'none'} · client status: {res['status']}")
             try:  # reflect the call in the live Google Sheet straight away
                 if update_customer_row(ctx, lead["lead_id"]):
                     st.toast("Google Sheet updated.")
@@ -503,8 +503,8 @@ def dialer(agent_id: str) -> None:
         st.success("✅ You're all caught up: nothing is due right now.")
         if later:
             st.caption(f"Next follow-up: {later[0]['urgency'].lower()} ({later[0]['name'] or later[0]['lead_id']}). "
-                       f"{sum(1 for q in later if q['heat_tier'] == 'hot')} hot lead(s) are scheduled later.")
-            if st.button("📞 Call ahead: start on upcoming leads (hot first)", type="primary"):
+                       f"{sum(1 for q in later if q['heat_tier'] == 'hot')} hot client(s) are scheduled later.")
+            if st.button("📞 Call ahead: start on upcoming clients (hot first)", type="primary"):
                 st.session_state[f"ahead_{agent_id}"] = True
                 st.rerun()
         return
@@ -553,14 +553,14 @@ def gm_sidebar(agent_id: str) -> None:
 def caller_leads(agent_id: str) -> None:
     leads = rows(ctx.conn, "SELECT * FROM leads WHERE assigned_to=? ORDER BY status, heat_score DESC", (agent_id,))
     if not leads:
-        st.info("No leads assigned yet.")
+        st.info("No clients assigned yet.")
         return
     df = pd.DataFrame([{"priority": TIER_BADGE.get(l["heat_tier"]), "heat": round(l["heat_score"]), "lead": l["lead_id"],
                         "name": l["name"], "phone": l["phone"], "category": l["category"], "status": l["status"],
                         "last outcome": OUTCOMES.get(l["last_outcome"] or "", {}).get("label", ""), "last contact": fmt(l["last_contact_at"]),
                         "NPC": l["npc_count"]} for l in leads])
     st.dataframe(df, hide_index=True, width="stretch")
-    st.markdown("#### Log a call for any lead (e.g. an inbound call)")
+    st.markdown("#### Log a call for any client (e.g. an inbound call)")
     pick = st.selectbox("Lead", [l["lead_id"] for l in leads], format_func=lambda i: f"{i} · {lead_by_id(i)['name']}")
     lead_panel(lead_by_id(pick), agent_id, f"any_{pick}")
 
@@ -615,7 +615,7 @@ def team_compliance() -> None:
     else:
         st.success("Nothing overdue.")
 
-    st.subheader("🔥 Hot leads not called yet")
+    st.subheader("🔥 Hot clients not called yet")
     hot = [l for l in rows(ctx.conn, "SELECT * FROM leads WHERE status='open' AND heat_tier='hot' AND last_contact_at IS NULL "
                                      "ORDER BY heat_score DESC") if l["assigned_to"] in callers]
     if hot:
@@ -623,7 +623,7 @@ def team_compliance() -> None:
                                     "GM": (ctx.member(l["assigned_to"]) or {}).get("name"), "assigned": fmt(l["assigned_at"]),
                                     "why hot": l["heat_reasons"]} for l in hot]), hide_index=True, width="stretch")
     else:
-        st.success("Every hot lead has been called.")
+        st.success("Every hot client has been called.")
 
     st.subheader(f"Missed follow-ups on {day:%d %b}")
     m = misses(ctx, day, team_of=me_id if scope == "My team" else None)
@@ -651,7 +651,7 @@ def escalations() -> None:
 def leads_page() -> None:
     leads = rows(ctx.conn, "SELECT * FROM leads ORDER BY heat_score DESC")
     if not leads:
-        st.info("No leads yet. Use 'Sync now' after configuring the lead sheet in config.yaml.")
+        st.info("No clients yet. Use 'Sync now' after configuring the client sheet in config.yaml.")
         return
     df = pd.DataFrame(leads)
     c_list, c0, c1, c2, c3 = st.columns(5)
@@ -673,7 +673,7 @@ def leads_page() -> None:
                        "npc_count", "last_outcome", "last_contact_at"]],
                  hide_index=True, width="stretch")
 
-    st.subheader("Reassign a lead")
+    st.subheader("Reassign a client")
     with st.form("reassign"):
         lead_id = st.selectbox("Lead", view["lead_id"].tolist(), format_func=lambda i: f"{i} · {lead_by_id(i)['name']}")
         to = st.selectbox("New GM", [m["id"] for m in ctx.callers()], format_func=lambda i: ctx.member(i)["name"])
@@ -731,7 +731,7 @@ def admin_page() -> None:
     counts = one(ctx.conn, "SELECT (SELECT COUNT(*) FROM events) e, (SELECT COUNT(*) FROM profiles) p, (SELECT MAX(event_time) FROM events) last")
     st.caption(f"{counts['e']} events · {counts['p']} user profiles · latest event {fmt(counts['last'])}")
 
-    st.subheader("Lead sheet")
+    st.subheader("Client sheet")
     src = ctx.cfg["sources"]["leads"]
     st.caption(f"Source: **{src['type']}** {src.get('path') if src['type'] == 'csv' else src.get('url') or src.get('spreadsheet_key')}. "
                "Change it in config.yaml. Syncs every few minutes when the scheduler is running.")
@@ -868,9 +868,9 @@ def customer_list_page() -> None:
     pr = c1.multiselect("Priority", ["🔥 Hot", "🌤️ Warm", "❄️ Cold"])
     cat = c2.multiselect("Category", sorted(df["Category"].unique()))
     gm = c3.multiselect("GM", sorted(df["GM"].unique()))
-    status = c4.multiselect("Lead status", sorted(df["Lead status"].unique()), default=["open"])
+    status = c4.multiselect("Client status", sorted(df["Client status"].unique()), default=["open"])
     view = df.assign(List=df["List"].replace("", "(none)"))
-    for col, sel in [("List", lst), ("Priority", pr), ("Category", cat), ("GM", gm), ("Lead status", status)]:
+    for col, sel in [("List", lst), ("Priority", pr), ("Category", cat), ("GM", gm), ("Client status", status)]:
         view = view[view[col].isin(sel)] if sel else view
     k = st.columns(4)
     k[0].metric("Customers", len(view))
@@ -890,26 +890,26 @@ def time_limits_md() -> str:
     r, sla = ctx.rules, current_sla(ctx)
     return (
         "| Follow-up | Due | Deadline |\n|---|---|---|\n"
-        f"| New 🔥 hot / 🌤️ warm / ❄️ cold lead | first call within {sla['hot']} / {sla['warm']} / {sla['cold']} min of assignment | |\n"
+        f"| New 🔥 hot / 🌤️ warm / ❄️ cold client | first call within {sla['hot']} / {sla['warm']} / {sla['cold']} min of assignment | |\n"
         f"| Not picked up, busy or switched off | automatically {r.get('npc_retry_hours', 4):g} h later (next morning if after hours) | |\n"
         "| Customer asked for a callback | the time you promised | |\n"
-        "| App activity or lead turned hot | immediately | |\n"
+        "| App activity or client turned hot | immediately | |\n"
         f"| **Any of the above** | | warning at **{r.get('warning_after_minutes', 15)} min** overdue · "
         f"escalated to your SM and counted as **missed** at **{r.get('escalate_after_minutes', 60)} min** |\n\n"
-        f"After {r.get('max_npc_attempts', 6)} NPCs in a row the lead is marked unreachable. "
+        f"After {r.get('max_npc_attempts', 6)} NPCs in a row the client is marked unreachable. "
         f"Working hours: {ctx.cfg['working_hours']['start']} to {ctx.cfg['working_hours']['end']}, {', '.join(ctx.cfg['working_hours']['days'])}."
     )
 
 
 def team_editor() -> None:
     st.subheader("👥 Team: GMs and SMs")
-    st.caption("Add your real Growth Managers and Service Managers, set who reports to whom and how many open leads each GM "
-               "can hold. Leave ID blank for new people. Removing or deactivating a GM moves their leads, with pending "
+    st.caption("Add your real Growth Managers and Service Managers, set who reports to whom and how many open clients each GM "
+               "can hold. Leave ID blank for new people. Removing or deactivating a GM moves their clients, with pending "
                "follow-ups and promised callbacks, to the other GMs.")
     sms = [m for m in ctx.team() if ctx.is_sm(m)]
     df = pd.DataFrame([{"ID": m["id"], "Name": m["name"], "Role": "SM" if ctx.is_sm(m) else "GM",
                         "Reports to (SM)": (ctx.member(ctx.sm_of(m)) or {}).get("name", "") if not ctx.is_sm(m) else "",
-                        "Capacity (open leads)": m.get("capacity", 50) if not ctx.is_sm(m) else None,
+                        "Capacity (open clients)": m.get("capacity", 50) if not ctx.is_sm(m) else None,
                         "Email": m.get("email", ""), "Active": m.get("active", True),
                         "Category focus (optional)": ", ".join(m.get("categories", []))} for m in ctx.team()])
     edited = st.data_editor(
@@ -919,19 +919,19 @@ def team_editor() -> None:
             "Role": st.column_config.SelectboxColumn(options=["GM", "SM"], required=True),
             "Reports to (SM)": st.column_config.SelectboxColumn(options=[m["name"] for m in sms] + [""],
                                                                 help="GMs only. Add the SM first, save, then pick them here"),
-            "Capacity (open leads)": st.column_config.NumberColumn(min_value=1, max_value=1000, step=5),
+            "Capacity (open clients)": st.column_config.NumberColumn(min_value=1, max_value=1000, step=5),
             "Active": st.column_config.CheckboxColumn(default=True),
         })
     if st.button("Save team", type="primary"):
         try:
             res = save_team(ctx, [{"id": r["ID"], "name": r["Name"], "role": r["Role"], "sm": r["Reports to (SM)"],
-                                   "capacity": r["Capacity (open leads)"], "email": r["Email"],
+                                   "capacity": r["Capacity (open clients)"], "email": r["Email"],
                                    "active": True if pd.isna(r["Active"]) else bool(r["Active"]),
                                    "categories": r["Category focus (optional)"]}
                                   for r in edited.fillna("").to_dict("records")])
             jobs.sync(ctx)  # hand out leads to new capacity straight away
             _customer_rows.clear()
-            st.success(f"Saved: {res['members']} people, {res['gms']} active GMs. {res['leads_moved']} leads moved to other GMs"
+            st.success(f"Saved: {res['members']} people, {res['gms']} active GMs. {res['leads_moved']} clients moved to other GMs"
                        + (f", {res['leads_back_to_pool']} back to the pool" if res["leads_back_to_pool"] else "") + ".")
         except ValueError as e:
             st.error(str(e))
@@ -1031,7 +1031,7 @@ def rules_page() -> None:
         cast = float if k == "npc_retry_hours" else int
         values[k] = st.number_input(f"{label} ({unit})", min_value=cast(lo), max_value=cast(hi),
                                     value=cast(r.get(k, lo)), step=cast(step), key=f"rule_{k}")
-    st.markdown("**First call for a newly assigned lead, by priority (minutes)**")
+    st.markdown("**First call for a newly assigned client, by priority (minutes)**")
     cols = st.columns(3)
     new_sla = {t: cols[i].number_input(lbl, min_value=5, max_value=1440, value=int(sla[t]), step=5, key=f"sla_{t}")
                for i, (t, lbl) in enumerate(SLA_TIERS.items())}
@@ -1071,7 +1071,7 @@ if not is_manager:
     gm_sidebar(me_id)
 if page == "📞 Call now":
     dialer(me_id)
-elif page == "My leads":
+elif page == "My clients":
     caller_leads(me_id)
 elif page == "Notifications":
     notifications_page(me_id)
@@ -1081,7 +1081,7 @@ elif page == "Escalations":
     escalations()
 elif page == "Customer list":
     customer_list_page()
-elif page == "Leads":
+elif page == "Clients":
     leads_page()
 elif page == "GM view":
     who = st.selectbox("Growth Manager", [m["id"] for m in ctx.callers()], format_func=lambda i: labels[i])

@@ -28,7 +28,7 @@ COLUMNS = [
     ("Days since registration", "days_since_registration"), ("Deposit status", "deposit_status"),
     ("First deposit date", "first_deposit_date"), ("Last trade date", "last_trade_date"),
     ("Days since last trade", "days_since_last_trade"), ("Holdings (₹)", "holdings"), ("Account status", "account_status"),
-    ("Stage", "stage"), ("Lead status", "status"),
+    ("Stage", "stage"), ("Client status", "status"),
     ("List", "list"), ("GM", "gm"), ("SM", "sm"), ("Next follow-up", "next_due"), ("Follow-up type", "next_kind"), ("Overdue", "overdue"),
     ("Calls made", "calls"), ("NPC attempts", "npc"), ("Last call outcome", "last_outcome"), ("Last call", "last_call"),
     ("Last call notes", "last_notes"),
@@ -148,7 +148,7 @@ def summary_table(ctx: Ctx, data: list[dict]) -> list[list]:
         cnt = Counter(r["priority"] for r in mine)
         table.append([gm, *[cnt.get(t, 0) for t in tiers], len(mine), sum(1 for r in mine if r["overdue"])])
     closed = Counter(r["status"] for r in data if r["status"] != "open")
-    table += [[], ["Closed leads", "Count"], *[[k, v] for k, v in sorted(closed.items())]]
+    table += [[], ["Closed clients", "Count"], *[[k, v] for k, v in sorted(closed.items())]]
     table += [[], [f"Updated {data[0]['updated'] if data else ''}. Rows are rewritten on every run: add your own notes in another sheet."]]
     return table
 
@@ -220,7 +220,7 @@ def update_customer_row(ctx: Ctx, lead_id: str) -> dict | None:
     cfg = ctx.cfg.get("outputs", {}).get("google_sheet", {})
     found = build_rows(ctx, lead_id)
     if not found:
-        return {"error": f"unknown lead {lead_id}"}
+        return {"error": f"unknown client {lead_id}"}
     row = found[0]
     book = _client(ctx).open_by_key(os.environ.get("GOOGLE_SHEET_KEY") or cfg["spreadsheet_key"])
     ws = book.worksheet(cfg.get("customers_tab", "Customers"))

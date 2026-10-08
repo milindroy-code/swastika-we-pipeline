@@ -23,7 +23,7 @@ EVENT_TIME_COLS = ["event_time", "event time", "eventtime", "event timestamp", "
 PHONE_COLS = ["phone", "phone number", "mobile", "mobile number", "we_phone"]
 EMAIL_COLS = ["email", "email id", "we_email"]
 NAME_COLS = ["name", "full name", "user name", "first name"]
-CATEGORY_COLS = ["category", "lead category", "segment"]
+CATEGORY_COLS = ["category", "client category", "lead category", "segment"]
 # Aggregated activity files: one row per user x activity, with a count and/or last-done date.
 ACTIVITY_COLS = ["activity", "activity name", "action", "event name", "event_name", "event", "events"]
 COUNT_COLS = ["count", "no of times", "no. of times", "number of times", "times", "frequency", "activity count",
@@ -78,7 +78,7 @@ def read_leads_frame(ctx: Ctx) -> pd.DataFrame:
         book = client.open_by_key(src["spreadsheet_key"])
         sheet = book.worksheet(src["worksheet"]) if src.get("worksheet") else book.sheet1
         return pd.DataFrame(sheet.get_all_records()).astype(str).fillna("")
-    raise ValueError(f"Unknown leads source type: {kind}")
+    raise ValueError(f"Unknown clients source type: {kind}")
 
 
 def _map_row(row: dict, columns: dict) -> tuple[dict, dict, dict]:

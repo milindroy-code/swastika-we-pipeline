@@ -100,7 +100,7 @@ def misses(ctx: Ctx, day: date, agent_id: str | None = None, team_of: str | None
     return out
 
 
-HEADERS = {"caller": "GM", "manager": "SM", "open_leads": "open leads", "new_leads": "new leads", "on_time": "on time",
+HEADERS = {"caller": "GM", "manager": "SM", "open_leads": "open clients", "new_leads": "new clients", "on_time": "on time",
            "carry_over": "carry-over", "compliance_pct": "on-time %", "sarthi_activations": "Sarthi activated", "funded_target": "Funded ≥ target",
            "deposits": "Deposits (₹)"}
 
@@ -153,11 +153,11 @@ def morning_note(ctx: Ctx, member: dict, day: date) -> tuple[str, str]:
     body = (
         f"Good morning {first},\n\nThis is how today is structured:\n{blocks}\n\n"
         f"**Your numbers today:** {len(today_q)} follow-ups scheduled · {len(overdue)} overdue/carry-over · "
-        f"{new} leads not yet called\n\n"
+        f"{new} clients not yet called\n\n"
         f"**Clear these first (overdue)**\n" + _table([item(q) for q in overdue[:15]], ["time", "lead", "phone", "type", "why"])
         + "\n\n**Scheduled today**\n" + _table([item(q) for q in today_q[:25]], ["time", "lead", "phone", "type", "why"])
         + f"\n\n**Market talking points**\n{market}\n\n"
-        "Open the dashboard for each lead's app activity and pitch. Log every call so your next follow-up is scheduled automatically.\n"
+        "Open the dashboard for each client's app activity and pitch. Log every call so your next follow-up is scheduled automatically.\n"
     )
     return subject, body
 
@@ -187,7 +187,7 @@ def routine_nudge(ctx: Ctx, member: dict, block: dict, start: datetime, end: dat
     subject = f"{start:%H:%M}: {block['block'].split(':')[0][:60]}"
     body = (f"{first}, {start:%H:%M}–{end:%H:%M}: {block['block']}\n\n"
             f"Your queue right now: **{len(overdue)} overdue** · **{len(this_hour)} due before {end:%H:%M}**"
-            + (f" · 🔥 {hot} hot" if hot else "") + ". Hot leads are at the top of My day.")
+            + (f" · 🔥 {hot} hot" if hot else "") + ". Hot clients are at the top of My day.")
     return subject, body
 
 

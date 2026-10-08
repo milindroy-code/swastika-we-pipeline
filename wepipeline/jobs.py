@@ -24,7 +24,7 @@ def sync(ctx: Ctx) -> dict:
     try:
         result["leads"] = sync_leads(ctx)
     except Exception as e:  # a sheet outage must not stop follow-up checks
-        log.exception("Lead sync failed")
+        log.exception("Client sync failed")
         result["leads"] = {"error": str(e)}
     try:
         result["webengage"] = sync_webengage(ctx)

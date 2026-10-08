@@ -23,6 +23,7 @@ from wepipeline.db import set_setting
 from wepipeline.sheet_export import COLUMNS, build_rows, export, update_customer_row
 from wepipeline.insights import customer_insight
 from wepipeline import sarthi
+from wepipeline.team import save_routine, save_team
 from wepipeline.upload import LIST_TYPES, analyse_upload, batch_rows, batch_workbook, list_uploads
 from wepipeline.clientdb import available as client_db_available
 from wepipeline.dialer import DUE_NOW, OVERDUE, dialer_queue, dismiss, next_call, reminders, urgency_counts
@@ -228,7 +229,7 @@ def caller_day(agent_id: str) -> None:
         with st.expander("📈 Market now (facts for context, never stock tips)"):
             st.markdown("\n".join(f"- {n['text']}" for n in live))
     with st.expander("🗓️ Today's hourly routine"):
-        st.markdown("\n".join(f"- **{x['time']}**: {x['block']}" for x in ctx.cfg.get("day_structure", [])))
+        st.markdown("\n".join(f"- **{x['time']}**: {x['block']}" for x in ctx.day_structure()))
     with st.expander("⏱️ Your follow-up time limits (set by admin)"):
         st.markdown(time_limits_md())
     note = one(ctx.conn, "SELECT * FROM notifications WHERE recipient=? AND kind='morning_note' ORDER BY created_at DESC LIMIT 1", (agent_id,))
@@ -515,7 +516,7 @@ def gm_sidebar(agent_id: str) -> None:
     sb.divider()
     block = current_block(ctx, ctx.now())
     sb.markdown("**🗓️ Day plan**")
-    for x in ctx.cfg.get("day_structure", []):
+    for x in ctx.day_structure():
         now_ = block and block[0]["time"] == x["time"]
         text = x["block"].split(":")[0] if ":" in x["block"][:60] else x["block"][:60]
         sb.markdown(f"{'▶️ **' if now_ else ''}{x['time']} {text}{'**' if now_ else ''}")
@@ -882,6 +883,63 @@ def time_limits_md() -> str:
     )
 
 
+def team_editor() -> None:
+    st.subheader("👥 Team: GMs and SMs")
+    st.caption("Add your real Growth Managers and Service Managers, set who reports to whom and how many open leads each GM "
+               "can hold. Leave ID blank for new people. Removing or deactivating a GM moves their leads, with pending "
+               "follow-ups and promised callbacks, to the other GMs.")
+    sms = [m for m in ctx.team() if ctx.is_sm(m)]
+    df = pd.DataFrame([{"ID": m["id"], "Name": m["name"], "Role": "SM" if ctx.is_sm(m) else "GM",
+                        "Reports to (SM)": (ctx.member(ctx.sm_of(m)) or {}).get("name", "") if not ctx.is_sm(m) else "",
+                        "Capacity (open leads)": m.get("capacity", 50) if not ctx.is_sm(m) else None,
+                        "Email": m.get("email", ""), "Active": m.get("active", True),
+                        "Category focus (optional)": ", ".join(m.get("categories", []))} for m in ctx.team()])
+    edited = st.data_editor(
+        df, num_rows="dynamic", hide_index=True, width="stretch", key="team_editor",
+        column_config={
+            "ID": st.column_config.TextColumn(help="Leave blank for a new person; it's generated from the name"),
+            "Role": st.column_config.SelectboxColumn(options=["GM", "SM"], required=True),
+            "Reports to (SM)": st.column_config.SelectboxColumn(options=[m["name"] for m in sms] + [""],
+                                                                help="GMs only. Add the SM first, save, then pick them here"),
+            "Capacity (open leads)": st.column_config.NumberColumn(min_value=1, max_value=1000, step=5),
+            "Active": st.column_config.CheckboxColumn(default=True),
+        })
+    if st.button("Save team", type="primary"):
+        try:
+            res = save_team(ctx, [{"id": r["ID"], "name": r["Name"], "role": r["Role"], "sm": r["Reports to (SM)"],
+                                   "capacity": r["Capacity (open leads)"], "email": r["Email"],
+                                   "active": True if pd.isna(r["Active"]) else bool(r["Active"]),
+                                   "categories": r["Category focus (optional)"]}
+                                  for r in edited.fillna("").to_dict("records")])
+            jobs.sync(ctx)  # hand out leads to new capacity straight away
+            _customer_rows.clear()
+            st.success(f"Saved: {res['members']} people, {res['gms']} active GMs. {res['leads_moved']} leads moved to other GMs"
+                       + (f", {res['leads_back_to_pool']} back to the pool" if res["leads_back_to_pool"] else "") + ".")
+        except ValueError as e:
+            st.error(str(e))
+
+
+def routine_editor() -> None:
+    st.subheader("🗓️ Hourly routine")
+    st.caption("The GM's day plan: shown in the morning note and the call screen. At the start of each block GMs get a nudge "
+               "with their live counts (untick Nudge for lunch). Working hours are "
+               f"{ctx.cfg['working_hours']['start']}–{ctx.cfg['working_hours']['end']}.")
+    df = pd.DataFrame([{"Start": b["time"], "What this hour is for": b["block"], "Nudge GMs": b.get("nudge", True)}
+                       for b in ctx.day_structure()])
+    edited = st.data_editor(df, num_rows="dynamic", hide_index=True, width="stretch", key="routine_editor",
+                            column_config={"Start": st.column_config.TextColumn(help="HH:MM, e.g. 14:00", required=True),
+                                           "What this hour is for": st.column_config.TextColumn(width="large"),
+                                           "Nudge GMs": st.column_config.CheckboxColumn(default=True)})
+    if st.button("Save routine", type="primary"):
+        try:
+            clean = save_routine(ctx, [{"time": r["Start"], "block": r["What this hour is for"],
+                                        "nudge": True if pd.isna(r["Nudge GMs"]) else bool(r["Nudge GMs"])}
+                                       for r in edited.to_dict("records")])
+            st.success(f"Saved {len(clean)} blocks. GMs see the new plan straight away.")
+        except ValueError as e:
+            st.error(str(e))
+
+
 def sarthi_track_view(editable: bool) -> None:
     """Sarthi's track record as GMs will quote it. Only the admin can change it (official, complete data)."""
     t = sarthi.track(ctx)
@@ -966,6 +1024,10 @@ def rules_page() -> None:
             st.rerun()
         except ValueError as e:
             st.error(str(e))
+    st.divider()
+    team_editor()
+    st.divider()
+    routine_editor()
     st.divider()
     sarthi_track_view(editable=True)
     st.divider()

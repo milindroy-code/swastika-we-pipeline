@@ -70,7 +70,7 @@ def test_pivot_workbook_creates_leads_and_activity(loaded):
     (f,) = result["webengage"]
     assert (f["kind"], f["users"], f["new_leads"]) == ("activity", 3, 3)
     lead = one(ctx.conn, "SELECT * FROM leads WHERE lead_id='HOT1'")
-    assert lead["category"] == "Authenticated - no funds added"  # from file_categories
+    assert lead["category"] == "Not yet matched in client DB"  # ageing comes from the client database
     acts = contributions(ctx, ["HOT1"])
     assert acts["ORDER_PLACED_MOB"]["count"] == 3
     assert parse_dt(acts["ORDER_PLACED_MOB"]["last"], TZ) == datetime(2026, 10, 7, 10, 0, tzinfo=TZ)

@@ -110,7 +110,7 @@ def morning_note(ctx: Ctx, member: dict, day: date) -> tuple[str, str]:
     from .pitch import market_notes
 
     lo, hi = _day_bounds(ctx, day)
-    blocks = "\n".join(f"- **{b['time']}**: {b['block']}" for b in ctx.cfg.get("day_structure", []))
+    blocks = "\n".join(f"- **{b['time']}**: {b['block']}" for b in ctx.day_structure())
     notes = market_notes(ctx, 5)
     market = "\n".join(f"- {n}" for n in notes) or "_No market notes yet._"
     first = member["name"].split(" ")[0]
@@ -156,7 +156,7 @@ def morning_note(ctx: Ctx, member: dict, day: date) -> tuple[str, str]:
 
 def current_block(ctx: Ctx, now: datetime) -> tuple[dict, datetime, datetime] | None:
     """The routine block running at `now`, with its start and end (the next block's start, or end of day)."""
-    blocks = sorted(ctx.cfg.get("day_structure", []), key=lambda b: b["time"])
+    blocks = sorted(ctx.day_structure(), key=lambda b: b["time"])
     starts = [datetime.combine(now.date(), time.fromisoformat(b["time"]), ctx.tz) for b in blocks]
     for i, (b, start) in enumerate(zip(blocks, starts)):
         end = starts[i + 1] if i + 1 < len(starts) else ctx.day_end(now.date())

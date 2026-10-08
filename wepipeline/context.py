@@ -49,6 +49,7 @@ class Ctx:
 
     def clear_rules_cache(self) -> None:
         self._rules_cache = None
+        self._settings_cache = {}
 
     def path(self, rel: str) -> Path:
         p = Path(rel)
@@ -93,8 +94,25 @@ class Ctx:
             return self.day_start(d)
         return dt
 
+    def _stored(self, key: str):
+        """Admin-edited settings (team, routine) override config.yaml; re-read at most once a minute."""
+        cache = getattr(self, "_settings_cache", None) or {}
+        hit = cache.get(key)
+        if hit and _time.monotonic() - hit[0] < 60:
+            return hit[1]
+        value = None
+        if self.conn is not None:
+            row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            value = json.loads(row["value"]) if row and row["value"] else None
+        cache[key] = (_time.monotonic(), value)
+        self._settings_cache = cache
+        return value
+
     def team(self) -> list[dict]:
-        return self.cfg.get("team", [])
+        return self._stored("team") or self.cfg.get("team", [])
+
+    def day_structure(self) -> list[dict]:
+        return self._stored("day_structure") or self.cfg.get("day_structure", [])
 
     def member(self, member_id: str | None) -> dict | None:
         return next((m for m in self.team() if m["id"] == member_id), None)

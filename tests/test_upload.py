@@ -44,7 +44,7 @@ def test_uploaded_pivot_is_scored_ranked_assigned_and_pitched(ctx, tmp_path):
             xl, sheet_name="DASHBOARD_OPENED_MOB", index=False)
     s = analyse_upload(ctx, path, uploaded_by="sm_01", list_type="no_deposit")
     assert (s["clients"], s["new_leads"], s["already_known"]) == (3, 2, 1)  # "Others" ignored
-    assert one(ctx.conn, "SELECT category FROM leads WHERE lead_id='HOTC'")["category"] == "Uploaded list - no deposit yet"
+    assert one(ctx.conn, "SELECT category FROM leads WHERE lead_id='HOTC'")["category"] == "Not yet matched in client DB"
     assert s["ageing"]["status"] == "skipped"
     assert s["assigned"] == 3 and s["waiting"] == 0
     assert one(ctx.conn, "SELECT COUNT(*) n FROM leads WHERE lead_id='Others'")["n"] == 0

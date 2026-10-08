@@ -53,7 +53,7 @@ The tables are created automatically the first time the app connects.
 
      ```toml
      DATABASE_URL = "postgresql://...neon.tech/neondb?sslmode=require"
-     ADMIN_PIN = "pick-a-pin-only-the-admin-knows"
+     ADMIN_PIN = "the admin PIN (the same one you use locally in .streamlit/secrets.toml)"
      # ANTHROPIC_API_KEY = "sk-ant-..."   # optional: AI-written pitches
      ```
 4. Click **Deploy**. The first build takes 2–3 minutes.

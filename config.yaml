@@ -103,10 +103,9 @@ sources:
     event_time_column: ""
     # Rows that are WebEngage totals or placeholders, not real clients.
     ignore_client_ids: ["Others", "(not set)", "null", "NA", "Total"]
-    # Leads created from an activity file get the category whose key appears in the file name
-    # (replaced by the client-database ageing category once `run.py pull-clients` has looked them up).
-    file_categories:
-      not_added_fund: "Authenticated - no funds added"
+    # Category is always the client-database ageing (New - no deposit 0-7 days, Traded - dormant...). What a list is
+    # (new / re-activation / payout) is the List column, chosen when an SM uploads it.
+    file_categories: {}
 
 # Map your WebEngage event names to the signals the system understands.
 signals:
@@ -154,7 +153,7 @@ heat:
   # Users in an activity file who are not in the lead sheet become leads, keyed by their ClientCode.
   create_leads_from_activity: true
   require_phone_for_new_leads: false
-  new_lead_category: "New user - app activity"
+  new_lead_category: "Not yet matched in client DB"   # until the client database has been looked up
 
 # Payout lists (uploaded on Customer list with "Customers doing a payout"): money is leaving, so every customer goes
 # to a GM, first in line. The retention pitch never delays or discourages the withdrawal.
@@ -174,7 +173,6 @@ category_stage:
   "KYC done - No deposit": kyc_no_deposit
   "Funded - No trade": funded_no_trade
   "Dormant trader": dormant_trader
-  "Authenticated - no funds added": kyc_no_deposit
   "New - no deposit (0-7 days)": kyc_no_deposit
   "New - no deposit (8-15 days)": kyc_no_deposit
   "New - no deposit (16-30 days)": kyc_no_deposit
@@ -183,9 +181,6 @@ category_stage:
   "Deposited - no trade yet": funded_no_trade
   "Traded - dormant (30+ days)": dormant_trader
   "Traded - active (last 30 days)": active_trader
-  "Uploaded list - no deposit yet": kyc_no_deposit
-  "Uploaded list - re-activation": dormant_trader
-  "Uploaded list - payout": payout
 
 team:
   # DUMMY TEAM for now: replace with the real people before go-live.

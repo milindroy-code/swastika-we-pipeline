@@ -145,6 +145,19 @@ Headlines that read like stock tips ("picks", "stocks to buy", "target", "rallie
 Pitches pick the note that matches the customer's research segment (F&O → VIX / Bank Nifty, Commodity → gold / crude).
 SMs can add their own notes on **Data & admin**, which appear first. The page also shows the live notes and every check.
 
+## Admin page (PIN)
+
+**Admin: rules** is unlocked with `ADMIN_PIN`. Locally it lives in `.streamlit/secrets.toml` (git ignores it); on
+Streamlit Cloud it goes in the app's Secrets. Four sections:
+- **Follow-up rules:** NPC retry hours, warning and escalation minutes, first-call times per priority.
+- **👥 Team:** the real GMs and SMs, who reports to whom, capacity, email, category focus, active. Leave ID blank for
+  new people. Removing or deactivating a GM moves their leads, with pending follow-ups and promised callbacks, to the
+  other GMs. This overrides `team:` in config.yaml.
+- **🗓️ Hourly routine:** the GM's day plan (start time, what the hour is for, nudge on or off). This overrides `day_structure:`.
+- **Sarthi track record:** pull from the research database, plus approved examples and the disclaimer.
+
+Team and routine are stored in the database, so changes apply straight away without a redeploy.
+
 ## Hourly routine
 
 Working hours run 10:00–18:30. `day_structure` in `config.yaml` sets the GM's hour-by-hour plan: huddle, hot leads,

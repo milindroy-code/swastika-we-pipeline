@@ -85,7 +85,7 @@ def send_routine_nudges(ctx: Ctx) -> int:
     if not found:
         return 0
     block, start, end = found
-    first_block = min(b["time"] for b in ctx.cfg.get("day_structure", []))
+    first_block = min(b["time"] for b in ctx.day_structure())
     key = f"routine_{block['time']}"
     if block.get("nudge", True) is False or block["time"] == first_block or _ran(ctx, key, now.date()):
         _mark(ctx, key, now.date())  # the first block is covered by the morning note

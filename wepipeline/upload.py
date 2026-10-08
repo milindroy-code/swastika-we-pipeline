@@ -29,9 +29,9 @@ BATCH_COLUMNS = [
 # What the SM says the list is: sets the category (and so the pitch stage) for customers new to the system.
 # The client database, when reachable, replaces it with the real ageing category.
 LIST_TYPES = {
-    "no_deposit": ("New customers without deposit", "Uploaded list - no deposit yet", "new"),
-    "reactivation": ("Re-activation customers (only engaged ones go to GMs)", "Uploaded list - re-activation", "reactivation"),
-    "payout": ("Customers doing a payout (retain the funds)", "Uploaded list - payout", "payout"),
+    "no_deposit": ("New customers without deposit", "Not yet matched in client DB", "new"),
+    "reactivation": ("Re-activation customers (only engaged ones go to GMs)", "Not yet matched in client DB", "reactivation"),
+    "payout": ("Customers doing a payout (retain the funds)", "Not yet matched in client DB", "payout"),
     "unknown": ("Mixed / not sure (work it out from app activity)", None, ""),  # not offered in the dashboard
 }
 TIER_FILL = {"🔥 Hot": "FCDDD9", "🌤️ Warm": "FFF2CC", "❄️ Cold": "E6EFFC"}
@@ -53,6 +53,14 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
         ctx.conn.execute(f"UPDATE leads SET campaign=? WHERE lead_id IN ({marks}) AND status='open'", (campaign, *ids))
         ctx.conn.commit()
     released = 0
+    fallback_stage = {"no_deposit": "kyc_no_deposit", "reactivation": "dormant_trader"}.get(list_type)
+    if fallback_stage:
+        for l in rows(ctx.conn, f"SELECT lead_id, extra FROM leads WHERE lead_id IN ({','.join('?' * len(ids))}) AND status='open'", ids):
+            extra = json.loads(l["extra"] or "{}")
+            if not extra.get("stage"):  # the client database, when reachable, replaces it with the real stage
+                extra["stage"] = fallback_stage
+                ctx.conn.execute("UPDATE leads SET extra=? WHERE lead_id=?", (json.dumps(extra), l["lead_id"]))
+        ctx.conn.commit()
     if campaign == "payout":
         _store_payout_details(ctx, path, ids)
     ageing = {"status": "skipped", "detail": "client database not configured"}

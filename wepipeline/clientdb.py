@@ -259,7 +259,11 @@ LOOKUP_FIELDS = ["CLIENT_ID", "REGISTRATION_DATE", "AccountStatus", "IsAccountCl
 
 def enrich_leads(ctx: Ctx, lookup: pd.DataFrame | None = None) -> dict:
     """Give every open lead its ageing category from the client database, whatever source it came from."""
-    leads = rows(ctx.conn, "SELECT lead_id, we_user_id, category, source, extra FROM leads WHERE status='open'")
+    ageing = NO_DEPOSIT_CATEGORIES | {"Deposited - no trade yet", "Traded - dormant (30+ days)", "Traded - active (last 30 days)",
+                                     "Not found in client DB"}
+    marks = ",".join("?" * len(ageing))
+    leads = rows(ctx.conn, f"SELECT lead_id, we_user_id, category, source, extra, status FROM leads "
+                           f"WHERE status='open' OR category NOT IN ({marks})", tuple(sorted(ageing)))
     if not leads:
         return {"looked_up": 0}
     ids = sorted({(l["we_user_id"] or l["lead_id"]).strip() for l in leads})
@@ -278,8 +282,14 @@ def enrich_leads(ctx: Ctx, lookup: pd.DataFrame | None = None) -> dict:
         extra = json.loads(lead["extra"] or "{}")
         if cid not in found:
             category = "Not found in client DB"
+            if lead["status"] != "open":
+                ctx.conn.execute("UPDATE leads SET category=? WHERE lead_id=?", (category, lead["lead_id"]))
+                continue
         else:
             info = classify(ctx, found[cid])
+            if lead["status"] != "open":  # closed lead with an old label: just give it its ageing category
+                ctx.conn.execute("UPDATE leads SET category=? WHERE lead_id=?", (info["category"], lead["lead_id"]))
+                continue
             if info["closed"]:
                 ctx.conn.execute("UPDATE leads SET status='invalid', last_outcome='account_closed', updated_at=? WHERE lead_id=?",
                                  (now, lead["lead_id"]))

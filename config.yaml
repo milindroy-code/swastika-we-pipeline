@@ -224,6 +224,13 @@ market:
   enabled: true
   refresh_minutes: 15
 
+# Offers GMs mention. Keep these exactly in line with the published tariff and services (compliance-approved wording).
+offers:
+  pricing_line: "discount brokerage pricing, comparable with Groww and Zerodha, with Sarthi ideas and alerts included"
+  rm_line: "a dedicated Relationship Manager (RM) to help them manage their trades"
+  # When the RM is offered proactively: pitch stages, plus high_value (holdings at or above heat.high_holdings)
+  rm_for_stages: [dormant_trader, active_trader, high_value]
+
 # Sarthi: the hero feature in every pitch (ready trade ideas in equity, F&O, commodities). Its track record is
 # entered by the admin on "Admin: rules" from official data; nothing is shown until it is entered.
 sarthi:

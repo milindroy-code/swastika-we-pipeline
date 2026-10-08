@@ -35,6 +35,20 @@ OBJECTIONS = {
 }
 
 
+def objection_lines(stage: str, sname: str, pricing: str, rm_line: str) -> str:
+    """The two or three objections most likely on this call, each with a one-line answer."""
+    lines = []
+    if stage in {"kyc_no_deposit", "funded_no_trade", "dormant_trader", "kyc_pending"}:
+        lines.append(f"\"I don't know what to trade\" → that's what {sname} is for: ready ideas with a stop-loss; start small, "
+                     "returns aren't guaranteed.")
+    if pricing and stage != "active_trader":
+        lines.append(f"\"Charges are high\" / \"I already use Zerodha or Groww\" → {pricing}.")
+    if rm_line and stage in {"dormant_trader", "funded_no_trade", "active_trader"}:
+        lines.append(f"\"No time to manage trades\" → we offer {rm_line}.")
+    lines.append(OBJECTIONS[stage].replace("\": ", "\" → ", 1))
+    return " · ".join(lines[:3])
+
+
 def activity_label(ctx: Ctx, activity: str) -> str:
     labels = {**DEFAULT_LABELS, **(ctx.cfg.get("activity_labels") or {})}
     base = activity.split(" · ")[0].strip()
@@ -113,6 +127,11 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     sname = sarthi.name(ctx)
     sarthi_active = extra.get("sarthi_active")  # True / False from the client database, None if unknown
     sarthi_calls = sig.get("research_call_accepted", {}).get("count", 0)
+    offers = ctx.cfg.get("offers") or {}
+    pricing = offers.get("pricing_line", "")
+    rm_line = offers.get("rm_line", "")
+    high_value = bool(holdings and holdings >= ctx.cfg.get("heat", {}).get("high_holdings", 100000))
+    offer_rm = bool(rm_line) and (stage in set(offers.get("rm_for_stages", [])) or (high_value and "high_value" in offers.get("rm_for_stages", [])))
 
     # ---- engagement levers: strongest first
     levers = []
@@ -134,7 +153,7 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         dep = f" ₹{first_dep:,.0f}" if first_dep else ""
         levers.append(f"Funded, never traded: deposited{dep} but no trade yet")
     if holdings and holdings >= ctx.cfg.get("heat", {}).get("high_holdings", 100000):
-        levers.append(f"High-value: holdings of ₹{holdings:,.0f}")
+        levers.append(f"High-value: holdings of ₹{holdings:,.0f}" + ("; offer a dedicated RM" if offer_rm else ""))
     if "deposit_failed" in sig:
         levers.append("Payment friction: a deposit attempt failed")
     if last24 >= 3:
@@ -202,6 +221,11 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         ideas.append(f"{sname} is active: open today's {seg or ''} ideas together".replace("  ", " "))
     if unfunded or stage == "dormant_trader":
         ideas.append(f"Ask them to add funds now ({sarthi.starter_amount(ctx, seg)}) so they're ready for {sname}'s next idea")
+    price_point = f"Pricing: {pricing}" if pricing and stage in {"kyc_no_deposit", "kyc_pending", "funded_no_trade", "dormant_trader"} else None
+    rm_point = f"If managing trades feels like too much, offer {rm_line}" if offer_rm else None
+    for point in ([rm_point, price_point] if stage == "dormant_trader" or high_value else [price_point, rm_point]):
+        if point:
+            ideas.append(point)
     if "trade_placed" in sig and unfunded:
         ideas.append("Check whether their orders were rejected for low balance, then help them add funds by UPI on the call")
     if stage == "dormant_trader":
@@ -250,9 +274,7 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         "opener": opener,
         "ideas": "\n".join(f"• {i}" for i in ideas[:4]),
         "next_action": next_action,
-        "objection": (f"\"I don't know what to trade\": that's what {sname} is for. Ready ideas with a stop-loss; start small, "
-                      "returns aren't guaranteed. " + OBJECTIONS[stage]) if stage in {"kyc_no_deposit", "funded_no_trade", "dormant_trader"}
-                     else OBJECTIONS[stage],
+        "objection": objection_lines(stage, sname, pricing, rm_line),
         "sarthi_status": ("active" if sarthi_active else "not activated" if sarthi_active is False else ""),
         "priority": TIER_BADGE.get(lead.get("heat_tier") or "cold"),
     }

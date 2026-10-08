@@ -91,4 +91,19 @@ def test_pitches_never_promise_earnings(ctx):
 def test_sarthi_is_not_repeated_in_the_points(ctx):
     lead = add_lead(ctx, "R1", {"stage": "kyc_no_deposit"}, [("RECOMMENDATION_LISTING_OPENED_MOB · commodity_research", 3)])
     ideas = customer_insight(ctx, lead)["ideas"].split("\n")
-    assert sum("ready" in i and "Sarthi" in i for i in ideas) == 1
+    assert sum(("ready ideas" in i or "ready trade ideas" in i) and "Sarthi" in i for i in ideas) == 1
+
+
+def test_pricing_and_rm_offers(ctx):
+    nodep = customer_insight(ctx, add_lead(ctx, "O1", {"stage": "kyc_no_deposit"}))
+    assert any(i.startswith("• Pricing: discount brokerage pricing, comparable with Groww and Zerodha") for i in nodep["ideas"].split("\n"))
+    assert "\"I already use Zerodha or Groww\" →" in nodep["objection"]
+    assert "Relationship Manager" not in nodep["ideas"]           # RM is not pushed on a brand-new no-deposit client
+    dormant = customer_insight(ctx, add_lead(ctx, "O2", {"stage": "dormant_trader", "days_since_last_trade": 90}))
+    points = dormant["ideas"].split("\n")
+    rm = next(i for i, p in enumerate(points) if "dedicated Relationship Manager" in p)
+    price = next(i for i, p in enumerate(points) if p.startswith("• Pricing:"))
+    assert rm < price                                              # dormant: RM before price
+    assert "\"No time to manage trades\" → we offer a dedicated Relationship Manager" in dormant["objection"]
+    rich = customer_insight(ctx, add_lead(ctx, "O3", {"stage": "kyc_no_deposit", "holdings": 500000}))
+    assert "offer a dedicated RM" in rich["levers"]

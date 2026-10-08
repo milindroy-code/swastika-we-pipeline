@@ -152,7 +152,8 @@ customers to help them finish KYC, add funds and start or resume trading.
 
 The firm's hero feature is Sarthi: ready trade ideas (entry, target, stop-loss) in equity, F&O and commodities that
 the customer can review and choose to take. Lead with Sarthi, matched to the customer's segment of interest, and aim
-for funds added to the account (margin). If a Sarthi track record is provided, quote it exactly as given (it includes
+for funds added to the account (margin). The firm offers discount brokerage pricing (see "offers"), with Sarthi ideas and
+alerts included, and a dedicated Relationship Manager for customers who find managing trades difficult. If a Sarthi track record is provided, quote it exactly as given (it includes
 stop-losses) followed by its disclaimer; never quote other figures or individual wins that are not provided.
 
 Write a short call plan for the caller from the customer facts provided:
@@ -180,6 +181,7 @@ def _ai_inputs(ctx: Ctx, lead: dict, summary: dict) -> dict:
         "previous_calls": calls,
         "npc_attempts": lead.get("npc_count"),
         "market_notes": market_notes(ctx, 5),
+        "offers": ctx.cfg.get("offers") or {},
         "hero_feature": {"name": sarthi.name(ctx),
                          "track_record": sarthi.track_line(ctx, (summary.get("segments") or [None])[0] and
                                                            SEGMENT_LABELS.get(summary["segments"][0])),

@@ -99,6 +99,7 @@ def collect(ctx: Ctx, start: date, end: date) -> tuple[list[dict], list[dict]]:
             "client": c["lead_id"], "name": c["name"] or "", "priority": TIER_BADGE.get(c["heat_tier"] or "cold"),
             "category": c["category"] or "", "outcome": OUTCOMES[c["outcome"]]["label"],
             "result": call_result(c["outcome"]), "notes": c["notes"] or "",
+            "sarthi": "Yes" if c.get("sarthi_activated") else "",
             "next": parse_dt(c["next_followup_at"], ctx.tz).replace(tzinfo=None) if c["next_followup_at"] else None,
         })
     return fus, calls
@@ -130,11 +131,12 @@ def build_workbook(ctx: Ctx, start: date, end: date, title_note: str = "") -> Wo
                                          FormulaRule(formula=[f'$J2="{label}"'], fill=PatternFill("solid", fgColor=color)))
 
     # ---------------------------------------------------------------- detail: calls
-    call_cols = ["Called at", "GM", "Client code", "Name", "Priority", "Category", "Outcome", "Call result", "Notes", "Next follow-up"]
-    _header(call_ws, 1, call_cols, [17, 16, 13, 16, 10, 26, 28, 16, 40, 17])
+    call_cols = ["Called at", "GM", "Client code", "Name", "Priority", "Category", "Outcome", "Call result", "Notes",
+                 "Next follow-up", "Sarthi activated"]
+    _header(call_ws, 1, call_cols, [17, 16, 13, 16, 10, 26, 28, 16, 40, 17, 10])
     for r, c in enumerate(calls, 2):
         _write(call_ws, r, [c["at"], c["gm"], c["client"], c["name"], c["priority"], c["category"], c["outcome"],
-                            c["result"], c["notes"], c["next"]], {1: "dd mmm yyyy hh:mm", 10: "dd mmm yyyy hh:mm"})
+                            c["result"], c["notes"], c["next"], c["sarthi"]], {1: "dd mmm yyyy hh:mm", 10: "dd mmm yyyy hh:mm"})
     n_call = max(len(calls) + 1, 2)
     call_ws.freeze_panes = "B2"
     call_ws.auto_filter.ref = f"A1:{get_column_letter(len(call_cols))}{n_call}"
@@ -170,6 +172,7 @@ def build_workbook(ctx: Ctx, start: date, end: date, title_note: str = "") -> Wo
         ("Not reached (NPC / busy / off)", f"=COUNTIFS({C('H')},\"Not reached\")", "0"),
         ("Converted", f"=COUNTIFS({C('H')},\"Converted\")", "0"),
         ("Reach rate", "=IFERROR(B13/B12,0)", "0.0%"),
+        ("Sarthi activated on calls", f"=COUNTIFS({C('K')},\"Yes\")", "0"),
     ]
     ws["A4"], ws["B4"] = "Headline", "Value"
     for c in (ws["A4"], ws["B4"]):

@@ -48,8 +48,10 @@ def log_call(
     outcome: str,
     notes: str = "",
     next_at: datetime | None = None,
+    sarthi_activated: bool = False,
 ) -> dict:
-    """Record a call, close the lead's pending follow-ups and schedule the next one per the rules."""
+    """Record a call, close the lead's pending follow-ups and schedule the next one per the rules.
+    sarthi_activated: the GM switched Sarthi on for the customer during this call."""
     if outcome not in OUTCOMES:
         raise ValueError(f"Unknown outcome {outcome!r}")
     spec = OUTCOMES[outcome]
@@ -63,8 +65,9 @@ def log_call(
 
     now = ctx.now()
     call_id = ctx.conn.execute(
-        "INSERT INTO calls (lead_id, agent_id, called_at, outcome, notes, next_followup_at) VALUES (?,?,?,?,?,?) RETURNING id",
-        (lead_id, agent_id, iso(now), outcome, notes, iso(next_at)),
+        "INSERT INTO calls (lead_id, agent_id, called_at, outcome, notes, next_followup_at, sarthi_activated) "
+        "VALUES (?,?,?,?,?,?,?) RETURNING id",
+        (lead_id, agent_id, iso(now), outcome, notes, iso(next_at), int(bool(sarthi_activated))),
     ).fetchone()["id"]
     ctx.conn.execute(
         "UPDATE followups SET status='done', completed_at=?, call_id=? WHERE lead_id=? AND status='pending'",
@@ -91,6 +94,10 @@ def log_call(
         "UPDATE leads SET status=?, npc_count=?, last_contact_at=?, last_outcome=?, updated_at=? WHERE lead_id=?",
         (status, npc_count, iso(now), outcome, iso(now), lead_id),
     )
+    if sarthi_activated:
+        extra = json.loads(lead.get("extra") or "{}")
+        extra.update(sarthi_active=True, sarthi_activated_on=iso(now), sarthi_activated_by=agent_id)
+        ctx.conn.execute("UPDATE leads SET extra=? WHERE lead_id=?", (json.dumps(extra), lead_id))
     ctx.conn.commit()
     if next_followup:
         add_followup(ctx, lead_id, agent_id, *next_followup)

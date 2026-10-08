@@ -41,7 +41,7 @@ def compliance(ctx: Ctx, day: date, team_of: str | None = None) -> list[dict]:
         for f in fus:
             counts[classify(ctx, f, now)] += 1
         due = sum(1 for f in fus if parse_dt(f["due_at"], ctx.tz) <= cutoff)
-        calls = rows(ctx.conn, "SELECT outcome FROM calls WHERE agent_id=? AND called_at>=? AND called_at<?", (m["id"], lo, hi))
+        calls = rows(ctx.conn, "SELECT outcome, sarthi_activated FROM calls WHERE agent_id=? AND called_at>=? AND called_at<?", (m["id"], lo, hi))
         carry = one(ctx.conn, "SELECT COUNT(*) AS n FROM followups f JOIN leads l ON l.lead_id=f.lead_id "
                     "WHERE f.agent_id=? AND f.status='pending' AND l.status='open' AND f.due_at<?", (m["id"], lo))["n"]
         out.append({
@@ -59,6 +59,7 @@ def compliance(ctx: Ctx, day: date, team_of: str | None = None) -> list[dict]:
             "connected": sum(1 for c in calls if c["outcome"] not in NPC_OUTCOMES),
             "npc": sum(1 for c in calls if c["outcome"] in NPC_OUTCOMES),
             "converted": sum(1 for c in calls if c["outcome"] == "converted"),
+            "sarthi_activations": sum(1 for c in calls if c["sarthi_activated"]),
         })
     return out
 
@@ -93,7 +94,7 @@ def misses(ctx: Ctx, day: date, agent_id: str | None = None, team_of: str | None
 
 
 HEADERS = {"caller": "GM", "manager": "SM", "open_leads": "open leads", "new_leads": "new leads", "on_time": "on time",
-           "carry_over": "carry-over", "compliance_pct": "on-time %"}
+           "carry_over": "carry-over", "compliance_pct": "on-time %", "sarthi_activations": "Sarthi activated"}
 
 
 def _table(items: list[dict], cols: list[str]) -> str:
@@ -186,14 +187,15 @@ def eod_report(ctx: Ctx, day: date, member: dict) -> tuple[str, str]:
     if ctx.is_sm(member):
         team = compliance(ctx, day, team_of=member["id"])
         missed = misses(ctx, day, team_of=member["id"])
-        totals = {k: sum(r[k] for r in team) for k in ["due", "on_time", "late", "missed", "overdue", "calls", "converted"]}
+        totals = {k: sum(r[k] for r in team) for k in ["due", "on_time", "late", "missed", "overdue", "calls", "converted", "sarthi_activations"]}
         pct = f"{100 * totals['on_time'] / totals['due']:.0f}%" if totals["due"] else "n/a"
         subject = f"EOD follow-up report {day:%d %b}: {totals['missed']} missed, {pct} on time"
         body = (
             f"**Team summary for {day:%a %d %b}**\n"
             f"Due {totals['due']} · on time {totals['on_time']} · late {totals['late']} · **missed {totals['missed']}** · "
-            f"still overdue {totals['overdue']} · calls {totals['calls']} · conversions {totals['converted']} · on-time rate {pct}\n\n"
-            + _table(team, ["caller", "open_leads", "new_leads", "due", "on_time", "late", "missed", "overdue", "carry_over", "compliance_pct", "calls", "connected", "npc", "converted"])
+            f"still overdue {totals['overdue']} · calls {totals['calls']} · conversions {totals['converted']} · "
+            f"Sarthi activated {totals['sarthi_activations']} · on-time rate {pct}\n\n"
+            + _table(team, ["caller", "open_leads", "new_leads", "due", "on_time", "late", "missed", "overdue", "carry_over", "compliance_pct", "calls", "connected", "npc", "converted", "sarthi_activations"])
             + f"\n\n**Missed follow-ups ({len(missed)})**\n" + _table(missed, ["caller", "lead", "phone", "type", "due", "state", "completed", "reason"])
         )
         return subject, body

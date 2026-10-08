@@ -64,10 +64,11 @@ def test_unfunded_research_user_gets_sarthi_and_margin_pitch(ctx):
     assert ins["opener"].startswith("I saw you've been following Sarthi's F&O trade ideas")
     ideas = ins["ideas"].split("\n")
     assert ideas[0] == "• Sarthi F&O, last 30 days: 14 of 20 closed ideas hit target, 6 hit stop-loss. Say it as it is, then: past results don't guarantee future ones"
-    assert "• Activate Sarthi for F&O with them on the call" in ideas
+    assert ideas[1].startswith("• Activate Sarthi for F&O with them now: it's needed to receive the ideas")
+    assert ins["opener"].endswith("The first step is switching on Sarthi so its ideas start reaching you.")
     assert any("add funds now (₹25,000)" in i for i in ideas)
-    assert "Sarthi user: accepted 4 Sarthi idea(s)" in ins["levers"] and "Sarthi not activated yet" in ins["levers"]
-    assert ins["next_action"].startswith("Funds added on the call + Sarthi activated")
+    assert "Sarthi user: accepted 4 Sarthi idea(s)" in ins["levers"] and "Sarthi not activated: activate it on the call" in ins["levers"]
+    assert ins["next_action"].startswith("Sarthi activated + funds added on the call")
     assert ins["sarthi_status"] == "not activated"
 
 
@@ -107,3 +108,23 @@ def test_pricing_and_rm_offers(ctx):
     assert "\"No time to manage trades\" → we offer a dedicated Relationship Manager" in dormant["objection"]
     rich = customer_insight(ctx, add_lead(ctx, "O3", {"stage": "kyc_no_deposit", "holdings": 500000}))
     assert "offer a dedicated RM" in rich["levers"]
+
+
+def test_unknown_status_asks_to_check_and_logged_activation_sticks(ctx):
+    from wepipeline.followups import log_call
+    from wepipeline.clientdb import enrich_leads
+    import pandas as pd
+
+    lead = add_lead(ctx, "S1", {"stage": "kyc_no_deposit"})
+    ins = customer_insight(ctx, lead)
+    assert ins["sarthi_status"] == "unknown"
+    assert "• Check Sarthi is activated (it's needed to receive the ideas); if not, activate it with them now" in ins["ideas"].split("\n")
+    assert ins["next_action"].startswith("Sarthi activated + funds added")
+
+    log_call(ctx, "S1", "gm_01", "interested", "Switched on Sarthi F&O", sarthi_activated=True)
+    after = customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='S1'"))
+    assert after["sarthi_status"] == "active" and "Check Sarthi" not in after["ideas"]
+    assert one(ctx.conn, "SELECT sarthi_activated FROM calls WHERE lead_id='S1'")["sarthi_activated"] == 1
+    # the client database replica still says "off": the GM's activation is kept
+    enrich_leads(ctx, pd.DataFrame([{"CLIENT_ID": "S1", "REGISTRATION_DATE": NOW.replace(tzinfo=None), "IsSarthiTIOn": 0}]))
+    assert customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='S1'"))["sarthi_status"] == "active"

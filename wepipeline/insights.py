@@ -143,8 +143,11 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
                       if unfunded else f"{sname} user: accepted {sarthi_calls} {sname} idea(s)")
     if segments:
         levers.append(f"{sname}-ready: interested in {', '.join(segments)} ideas")
+    needs_sarthi = stage in {"kyc_pending", "kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader"}
     if sarthi_active is False:
-        levers.append(f"{sname} not activated yet: activate it on the call")
+        levers.append(f"{sname} not activated: activate it on the call (needed to receive the ideas)")
+    elif sarthi_active is None and needs_sarthi:
+        levers.append(f"{sname} status unknown: check it's activated")
     if "trade_placed" in sig and not unfunded:
         levers.append(f"Order intent: placed {sig['trade_placed']['count']} order(s) recently; check they went through (margin / balance)")
     if stage == "dormant_trader" and ltd_days is not None:
@@ -203,6 +206,8 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
                   f"{sname} sends ready trade ideas with entry, target and stop-loss. Shall I help you add funds and try the next one?")
     else:
         opener = play["opener"]
+    if sarthi_active is False and needs_sarthi:
+        opener += f" The first step is switching on {sname} so its ideas start reaching you."
 
     # ---- pitch ideas: Sarthi story, its complete track record, activation, then margin
     ideas = []
@@ -212,13 +217,16 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     else:
         ideas.append(f"{sname} explained simply: ready ideas with entry, target and stop-loss in {seg or 'equity, F&O and commodities'}; "
                      "they choose what to take and can start small")
+    if sarthi_active is False:
+        ideas.append(f"Activate {sname}{' for ' + seg if seg else ''} with them now: it's needed to receive the ideas and is "
+                     "included with their account")
+    elif sarthi_active is None and needs_sarthi:
+        ideas.append(f"Check {sname} is activated (it's needed to receive the ideas); if not, activate it with them now")
+    elif sarthi_active:
+        ideas.append(f"{sname} is active: open today's {seg or ''} ideas together".replace("  ", " "))
     example = sarthi.highlight_for(ctx, seg)
     if example:
         ideas.append(f"Recent {sname} example: {example}")
-    if sarthi_active is False:
-        ideas.append(f"Activate {sname}{' for ' + seg if seg else ''} with them on the call")
-    elif sarthi_active:
-        ideas.append(f"{sname} is active: open today's {seg or ''} ideas together".replace("  ", " "))
     if unfunded or stage == "dormant_trader":
         ideas.append(f"Ask them to add funds now ({sarthi.starter_amount(ctx, seg)}) so they're ready for {sname}'s next idea")
     price_point = f"Pricing: {pricing}" if pricing and stage in {"kyc_no_deposit", "kyc_pending", "funded_no_trade", "dormant_trader"} else None
@@ -245,10 +253,12 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
 
     best = f" around {best_time}" if best_time else ""
     action = {"kyc_pending": f"Complete KYC, then introduce {sname}",
-              "kyc_no_deposit": f"Funds added on the call + {sname} activated",
+              "kyc_no_deposit": f"{sname} activated + funds added on the call",
               "funded_no_trade": f"First trade, using a {sname} idea",
               "dormant_trader": f"Funds topped up + first trade back with a {sname} idea",
               "active_trader": f"{sname} in a new segment + more margin"}[stage]
+    if sarthi_active is not True and needs_sarthi and not action.startswith(sname):
+        action = f"{sname} activated + " + action[0].lower() + action[1:]
     next_action = f"{action}; call{best}" if lead.get("heat_tier") != "cold" or best else action
 
     return {
@@ -272,9 +282,9 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         "segments": ", ".join(segments),
         "levers": "\n".join(f"• {l}" for l in levers[:4]),
         "opener": opener,
-        "ideas": "\n".join(f"• {i}" for i in ideas[:4]),
+        "ideas": "\n".join(f"• {i}" for i in ideas[:6]),  # the call card shows the first 3; sheets show all
         "next_action": next_action,
         "objection": objection_lines(stage, sname, pricing, rm_line),
-        "sarthi_status": ("active" if sarthi_active else "not activated" if sarthi_active is False else ""),
+        "sarthi_status": ("active" if sarthi_active else "not activated" if sarthi_active is False else "unknown"),
         "priority": TIER_BADGE.get(lead.get("heat_tier") or "cold"),
     }

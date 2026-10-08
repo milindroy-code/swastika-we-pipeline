@@ -288,7 +288,10 @@ def enrich_leads(ctx: Ctx, lookup: pd.DataFrame | None = None) -> dict:
                 closed += 1
                 continue
             category = info["category"]
+            activated_here = extra.get("sarthi_activated_by")  # a GM switched it on; the replica may not show it yet
             extra.update(info["extra"])
+            if activated_here and not extra.get("sarthi_active"):
+                extra["sarthi_active"] = True
             if info["registration"]:
                 ctx.conn.execute(
                     """INSERT INTO activity_summary (user_id, activity, count, last_at, activity_type, source_file) VALUES (?,?,?,?,?,?)

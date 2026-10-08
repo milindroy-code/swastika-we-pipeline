@@ -14,6 +14,7 @@ from .clientdb import REGISTERED
 from .context import Ctx, iso, parse_dt
 from .db import rows
 from .heat import TIER_BADGE, contributions, score
+from . import ideas as ideas_mod
 from . import sarthi
 from .pitch import PLAYBOOKS, market_notes, segment_label
 
@@ -33,6 +34,7 @@ OBJECTIONS = {
     "dormant_trader": "\"Charges / app issues\": ask what stopped them, note it for the SM, and show what has changed.",
     "active_trader": "\"I'm fine for now\": ask for feedback and mention segments they haven't activated, with risk disclosures.",
     "payout": "\"I need the money\": respect it; the payout is processed as normal. Ask if a small balance can stay for Sarthi's next idea.",
+    "low_margin": "\"I've already deposited\": yes, and the account is live; topping up to ₹30,000 lets them take more Sarthi ideas at once.",
 }
 
 
@@ -159,7 +161,7 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
                       if unfunded else f"{sname} user: accepted {sarthi_calls} {sname} idea(s)")
     if segments:
         levers.append(f"{sname}-ready: interested in {', '.join(segments)} ideas")
-    needs_sarthi = stage in {"kyc_pending", "kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader"}
+    needs_sarthi = stage in {"kyc_pending", "kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader", "low_margin"}
     if sarthi_active is False:
         levers.append(f"{sname} not activated: activate it on the call (needed to receive the ideas)")
     elif sarthi_active is None and needs_sarthi:
@@ -257,7 +259,7 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     example = sarthi.highlight_for(ctx, seg) if stage != "payout" else None
     if example:
         ideas.append(f"Recent {sname} example: {example}")
-    if (unfunded or stage == "dormant_trader") and stage != "payout":
+    if (unfunded or stage in {"dormant_trader", "low_margin"}) and stage != "payout":
         ideas.append(f"Ask them to add funds now ({sarthi.starter_amount(ctx, seg)}) so they're ready for {sname}'s next idea")
     price_point = f"Pricing: {pricing}" if pricing and stage in {"kyc_no_deposit", "kyc_pending", "funded_no_trade", "dormant_trader"} else None
     rm_point = f"If managing trades feels like too much, offer {rm_line}" if offer_rm and stage != "payout" else None
@@ -281,13 +283,39 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     if context:
         ideas.append(f"Market context (facts only, no tips): {context}")
 
+    # ---- call ideas: data point -> angle, in Hinglish (the GM uses their own words; no script)
+    def days_since(key):
+        last = parse_dt(sig.get(key, {}).get("last"), ctx.tz)
+        return (now - last).total_seconds() / 86400 if last else 0
+    offers_hi = ctx.cfg.get("offers") or {}
+    call_ideas = ideas_mod.build({
+        "sname": sname, "seg": seg, "segments": segments, "stage": stage, "unfunded": unfunded,
+        "orders_unfunded": sig.get("trade_placed", {}).get("count", 0) if unfunded else 0,
+        "orders_funded": sig.get("trade_placed", {}).get("count", 0) if not unfunded else 0,
+        "orders_days": days_since("trade_placed"), "sarthi_calls": sarthi_calls, "sarthi_days": days_since("research_call_accepted"),
+        "research_views": sig.get("research_viewed", {}).get("count", 0),
+        "record": record, "record_hi": sarthi.track_line_hi(ctx, seg), "example": example,
+        "sarthi_active": sarthi_active if needs_sarthi else True,
+        "reg_days": reg_days, "ltd_days": ltd_days, "first_deposit": first_dep, "holdings": holdings, "high_value": high_value,
+        "offer_rm": offer_rm, "starter_hi": sarthi.starter_amount(ctx, seg).replace("an amount they're comfortable with", "jitna comfortable ho"),
+        "last24": last24, "best_time": best_time, "npc_count": lead.get("npc_count") or 0,
+        "pricing_hi": offers_hi.get("pricing_line_hi", ""), "rm_hi": offers_hi.get("rm_line_hi", ""),
+        "market": context, "payout_amount": payout_amt,
+        "payout_date": (parse_dt(extra.get("payout_date"), ctx.tz).strftime("%d %b") if extra.get("payout_date") else None),
+        "target": sarthi.target(ctx), "margin": sarthi.margin_facts(ctx, seg),
+        "current_margin": extra.get("current_margin") or (first_dep if stage == "low_margin" else None),
+        "reactivation_engaged": lead.get("campaign") == "reactivation" and lead.get("heat_tier") in {"hot", "warm"},
+        "funding_push": lead.get("campaign") == "reactivation",  # churned list: deposit + trades, whatever the trade history
+    })
+
     best = f" around {best_time}" if best_time else ""
     action = {"kyc_pending": f"Complete KYC, then introduce {sname}",
-              "kyc_no_deposit": f"{sname} activated + funds added on the call",
+              "kyc_no_deposit": f"{sname} activated + {sarthi.starter_amount(ctx, seg)} deposit on the call",
               "funded_no_trade": f"First trade, using a {sname} idea",
-              "dormant_trader": f"Funds topped up + first trade back with a {sname} idea",
+              "dormant_trader": f"Funds topped up to {sarthi.starter_amount(ctx, seg)} + first trade back with a {sname} idea",
               "active_trader": f"{sname} in a new segment + more margin",
-              "payout": "Understand why they're withdrawing; keep the relationship (and part of the funds, if they choose)"}[stage]
+              "payout": "Find and fix the reason; they stay invested and trade more (cancelling the payout is their choice)",
+              "low_margin": f"Top-up to {sarthi.starter_amount(ctx, seg)} on the call + first trade with a {sname} idea"}[stage]
     if sarthi_active is not True and needs_sarthi and not action.startswith(sname) and stage != "payout":
         action = f"{sname} activated + " + action[0].lower() + action[1:]
     next_action = f"{action}; call{best}" if lead.get("heat_tier") != "cold" or best else action
@@ -316,6 +344,21 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         "ideas": "\n".join(f"• {i}" for i in ideas[:6]),  # the call card shows the first 3; sheets show all
         "next_action": next_action,
         "objection": objection_lines(stage, sname, pricing, rm_line),
+        "call_ideas": call_ideas,
+        "propositions": ideas_mod.propositions(ctx.cfg, stage, seg, " ".join(i["angle"] for i in call_ideas)),
+        "closing": ideas_mod.closing({"sname": sname, "stage": stage, "target": sarthi.target(ctx), "unfunded": unfunded,
+                                      "starter_hi": sarthi.starter_amount(ctx, seg),
+                                      "current_margin": extra.get("current_margin") or (first_dep if stage == "low_margin" else None),
+                                      "sarthi_active": sarthi_active if needs_sarthi else True,
+                                      "funding_push": lead.get("campaign") == "reactivation"}, ctx.cfg),
+        "call_ideas_text": "\n".join(f"• {i['fact']} → {i['angle']}" for i in call_ideas),
+        "closing_text": "\n".join(f"• {c}" for c in ideas_mod.closing({"sname": sname, "stage": stage, "target": sarthi.target(ctx),
+                                                                    "unfunded": unfunded, "starter_hi": sarthi.starter_amount(ctx, seg),
+                                                                    "current_margin": extra.get("current_margin") or (first_dep if stage == "low_margin" else None),
+                                                                    "sarthi_active": sarthi_active if needs_sarthi else True,
+                                      "funding_push": lead.get("campaign") == "reactivation"}, ctx.cfg)),
+        "objections_hi": " · ".join(ideas_mod.objections(stage, sname, offers_hi.get("pricing_line_hi", ""),
+                                                         offers_hi.get("rm_line_hi", ""))),
         "sarthi_status": ("active" if sarthi_active else "not activated" if sarthi_active is False else "unknown"),
         "priority": TIER_BADGE.get(lead.get("heat_tier") or "cold"),
     }

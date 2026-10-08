@@ -235,8 +235,36 @@ market:
 offers:
   pricing_line: "discount brokerage pricing, comparable with Groww and Zerodha, with Sarthi ideas and alerts included"
   rm_line: "a dedicated Relationship Manager (RM) to help them manage their trades"
+  # Hinglish versions used in the GM's call ideas
+  pricing_line_hi: "Pricing Groww aur Zerodha jaisi discount wali hai, aur Sarthi ideas + alerts saath mein included hain"
+  rm_line_hi: "ek dedicated Relationship Manager (RM) milega, jo trades manage karne mein help karega"
   # When the RM is offered proactively: pitch stages, plus high_value (holdings at or above heat.high_holdings)
   rm_for_stages: [dormant_trader, active_trader, high_value]
+
+# Swastika propositions GMs stack on a call, matched to the customer. Add your own (IPO, MTF, mutual funds, account
+# offers...) with compliance-approved wording. "for": pitch stages it suits (kyc_no_deposit, funded_no_trade,
+# dormant_trader, active_trader, payout) or "all"; "segments": optional Equity / F&O / Commodity filter.
+propositions:
+  - name: Sarthi trade ideas
+    for: [all]
+    pitch_hi: "Sarthi ready trade ideas deta hai: entry, target, stop-loss ke saath. Research ki tension nahi, faisla aapka"
+  - name: Discount brokerage
+    for: [kyc_no_deposit, funded_no_trade, dormant_trader, payout]
+    pitch_hi: "Brokerage Groww / Zerodha jaisi discount wali, upar se Sarthi ideas aur alerts included"
+  - name: Recommendations and alerts
+    for: [kyc_no_deposit, funded_no_trade, dormant_trader, active_trader]
+    pitch_hi: "Market alerts aur recommendations seedha app pe aate hain, kuch miss nahi hoga"
+  - name: Dedicated RM
+    for: [dormant_trader, active_trader, payout]
+    pitch_hi: "Trades manage karna mushkil lage toh dedicated Relationship Manager (RM) saath rahega"
+
+# How assertive the close is: GMs ask for the full target first, then fall back to a first step plus a set top-up time.
+closing:
+  fallback_amount: 10000        # first step if ₹30k isn't possible today; the rest is booked as a top-up follow-up
+
+# OKR: an account counts as funded at this deposit. Every funding ask in the pitch aims for it, and reports count
+# conversions at or above it ("Funded ≥ ₹30k").
+funding_target: 30000
 
 # Sarthi: the hero feature in every pitch (ready trade ideas in equity, F&O, commodities). Its track record is
 # entered by the admin on "Admin: rules" from official data; nothing is shown until it is entered.
@@ -244,7 +272,7 @@ sarthi:
   name: Sarthi
   # Suggested first deposit per segment for the "add funds" ask, e.g. { Equity: 5000, "F&O": 25000, Commodity: 10000, default: 5000 }.
   # Leave empty to say "an amount they're comfortable with".
-  starter_amount: {}
+  starter_amount: {}             # per-segment override of the funding ask; empty = funding_target for everyone
   track_days: 30                 # Sarthi's record is every closed idea in this many days (from tblScripOrder)
 
 market_notes_file: data/market_notes.md

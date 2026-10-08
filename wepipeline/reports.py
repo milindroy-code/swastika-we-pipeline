@@ -1,6 +1,7 @@
 """Compliance metrics, the morning note and the end-of-day report."""
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, time, timedelta
 
 from .context import Ctx, iso, parse_dt
@@ -41,7 +42,11 @@ def compliance(ctx: Ctx, day: date, team_of: str | None = None) -> list[dict]:
         for f in fus:
             counts[classify(ctx, f, now)] += 1
         due = sum(1 for f in fus if parse_dt(f["due_at"], ctx.tz) <= cutoff)
-        calls = rows(ctx.conn, "SELECT outcome, sarthi_activated FROM calls WHERE agent_id=? AND called_at>=? AND called_at<?", (m["id"], lo, hi))
+        calls = rows(ctx.conn, "SELECT c.outcome, c.sarthi_activated, c.deposit_amount, l.extra FROM calls c "
+                               "JOIN leads l ON l.lead_id=c.lead_id WHERE c.agent_id=? AND c.called_at>=? AND c.called_at<?", (m["id"], lo, hi))
+        for c in calls:  # a top-up counts towards the target together with what was already in the account
+            c["deposit_amount"] = (c["deposit_amount"] or 0) and (c["deposit_amount"] + (json.loads(c["extra"] or "{}").get("current_margin") or 0))
+        goal = int(ctx.cfg.get("funding_target") or 0)
         carry = one(ctx.conn, "SELECT COUNT(*) AS n FROM followups f JOIN leads l ON l.lead_id=f.lead_id "
                     "WHERE f.agent_id=? AND f.status='pending' AND l.status='open' AND f.due_at<?", (m["id"], lo))["n"]
         out.append({
@@ -60,6 +65,8 @@ def compliance(ctx: Ctx, day: date, team_of: str | None = None) -> list[dict]:
             "npc": sum(1 for c in calls if c["outcome"] in NPC_OUTCOMES),
             "converted": sum(1 for c in calls if c["outcome"] == "converted"),
             "sarthi_activations": sum(1 for c in calls if c["sarthi_activated"]),
+            "funded_target": sum(1 for c in calls if c["outcome"] == "converted" and (c["deposit_amount"] or 0) >= goal > 0),
+            "deposits": round(sum(c["deposit_amount"] or 0 for c in calls if c["outcome"] == "converted")),
         })
     return out
 
@@ -94,7 +101,8 @@ def misses(ctx: Ctx, day: date, agent_id: str | None = None, team_of: str | None
 
 
 HEADERS = {"caller": "GM", "manager": "SM", "open_leads": "open leads", "new_leads": "new leads", "on_time": "on time",
-           "carry_over": "carry-over", "compliance_pct": "on-time %", "sarthi_activations": "Sarthi activated"}
+           "carry_over": "carry-over", "compliance_pct": "on-time %", "sarthi_activations": "Sarthi activated", "funded_target": "Funded ≥ target",
+           "deposits": "Deposits (₹)"}
 
 
 def _table(items: list[dict], cols: list[str]) -> str:
@@ -187,15 +195,17 @@ def eod_report(ctx: Ctx, day: date, member: dict) -> tuple[str, str]:
     if ctx.is_sm(member):
         team = compliance(ctx, day, team_of=member["id"])
         missed = misses(ctx, day, team_of=member["id"])
-        totals = {k: sum(r[k] for r in team) for k in ["due", "on_time", "late", "missed", "overdue", "calls", "converted", "sarthi_activations"]}
+        totals = {k: sum(r[k] for r in team) for k in ["due", "on_time", "late", "missed", "overdue", "calls", "converted",
+                                                         "sarthi_activations", "funded_target", "deposits"]}
         pct = f"{100 * totals['on_time'] / totals['due']:.0f}%" if totals["due"] else "n/a"
         subject = f"EOD follow-up report {day:%d %b}: {totals['missed']} missed, {pct} on time"
         body = (
             f"**Team summary for {day:%a %d %b}**\n"
             f"Due {totals['due']} · on time {totals['on_time']} · late {totals['late']} · **missed {totals['missed']}** · "
             f"still overdue {totals['overdue']} · calls {totals['calls']} · conversions {totals['converted']} · "
-            f"Sarthi activated {totals['sarthi_activations']} · on-time rate {pct}\n\n"
-            + _table(team, ["caller", "open_leads", "new_leads", "due", "on_time", "late", "missed", "overdue", "carry_over", "compliance_pct", "calls", "connected", "npc", "converted", "sarthi_activations"])
+            f"Sarthi activated {totals['sarthi_activations']} · funded ≥ ₹{int(ctx.cfg.get('funding_target') or 0):,}: "
+            f"{totals['funded_target']} (₹{totals['deposits']:,} deposited) · on-time rate {pct}\n\n"
+            + _table(team, ["caller", "open_leads", "new_leads", "due", "on_time", "late", "missed", "overdue", "carry_over", "compliance_pct", "calls", "connected", "npc", "converted", "sarthi_activations", "funded_target", "deposits"])
             + f"\n\n**Missed follow-ups ({len(missed)})**\n" + _table(missed, ["caller", "lead", "phone", "type", "due", "state", "completed", "reason"])
         )
         return subject, body

@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS settings (
 LATER_COLUMNS = {
     "leads": {"heat_score": "REAL NOT NULL DEFAULT 0", "heat_tier": "TEXT NOT NULL DEFAULT 'cold'", "heat_reasons": "TEXT",
               "campaign": "TEXT NOT NULL DEFAULT ''"},  # list the lead belongs to, e.g. 'reactivation'
-    "calls": {"sarthi_activated": "INTEGER NOT NULL DEFAULT 0"},
+    "calls": {"sarthi_activated": "INTEGER NOT NULL DEFAULT 0", "deposit_amount": "REAL"},
 }
 
 

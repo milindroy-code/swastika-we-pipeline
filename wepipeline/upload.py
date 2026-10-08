@@ -23,15 +23,16 @@ BATCH_COLUMNS = [
     ("Days since registration", "days_since_registration"), ("Deposit status", "deposit_status"),
     ("Last trade date", "last_trade_date"), ("Core activity (type × times, recency)", "core_detail"),
     ("Non-core activity", "non_core_detail"), ("Best time to call", "best_time"), ("Research segments", "segments"), ("Sarthi status", "sarthi_status"),
-    ("Why hot (score drivers)", "heat_reasons"), ("Engagement levers", "levers"), ("Conversation opener", "opener"),
-    ("Pitch ideas", "ideas"), ("Objection to expect", "objection"), ("Lead status", "status"),
+    ("Why hot (score drivers)", "heat_reasons"), ("Engagement levers", "levers"),
+    ("Call ideas (data → angle)", "call_ideas_text"), ("Close", "closing_text"), ("Agar customer bole", "objections_hi"), ("Lead status", "status"),
 ]
 # What the SM says the list is: sets the category (and so the pitch stage) for customers new to the system.
 # The client database, when reachable, replaces it with the real ageing category.
 LIST_TYPES = {
-    "no_deposit": ("New customers without deposit", "Not yet matched in client DB", "new"),
-    "reactivation": ("Re-activation customers (only engaged ones go to GMs)", "Not yet matched in client DB", "reactivation"),
-    "payout": ("Customers doing a payout (retain the funds)", "Not yet matched in client DB", "payout"),
+    "no_deposit": ("New clients without deposit (push to ₹30k)", "Not yet matched in client DB", "new"),
+    "low_margin": ("New clients with low margin, deposits under ₹30k (top up to ₹30k)", "Not yet matched in client DB", "low_margin"),
+    "reactivation": ("Churned clients showing activity (resurrect; only engaged ones go to GMs)", "Not yet matched in client DB", "reactivation"),
+    "payout": ("Clients who made payouts (keep them invested and trading)", "Not yet matched in client DB", "payout"),
     "unknown": ("Mixed / not sure (work it out from app activity)", None, ""),  # not offered in the dashboard
 }
 TIER_FILL = {"🔥 Hot": "FCDDD9", "🌤️ Warm": "FFF2CC", "❄️ Cold": "E6EFFC"}
@@ -63,6 +64,8 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
         ctx.conn.commit()
     if campaign == "payout":
         _store_payout_details(ctx, path, ids)
+    if campaign == "low_margin":
+        _store_amounts(ctx, path, ids, MARGIN_COLS, "current_margin")
     ageing = {"status": "skipped", "detail": "client database not configured"}
     if use_client_db and available(ctx) and not reachable(ctx):
         ageing = {"status": "unavailable", "detail": "client database not reachable from here (office network / VPN needed)"}
@@ -108,6 +111,36 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
 
 PAYOUT_AMOUNT_COLS = ["payout amount", "withdrawal amount", "amount", "payout", "requested amount", "payout amt"]
 PAYOUT_DATE_COLS = ["payout date", "withdrawal date", "request date", "requested on", "date"]
+
+
+MARGIN_COLS = ["current margin", "margin", "ledger balance", "ledger", "balance", "available margin", "funds",
+               "deposit amount", "deposit", "total deposit", "first deposit"]
+
+
+def _store_amounts(ctx: Ctx, path: Path, ids: list[str], columns: list[str], key: str) -> int:
+    """Copy an amount column (e.g. current margin) from the uploaded file onto each client's lead."""
+    from .ingest import USER_ID_COLS, _find, _read_sheets
+
+    wanted, found = set(ids), {}
+    for df in _read_sheets(path).values():
+        uid, col = _find(df, "", USER_ID_COLS), _find(df, "", columns)
+        if not uid or not col:
+            continue
+        for r in df.to_dict("records"):
+            cid = str(r[uid]).strip()
+            try:
+                if cid in wanted and str(r[col]).strip():
+                    found[cid] = float(str(r[col]).replace(",", "").replace("₹", ""))
+            except ValueError:
+                pass
+    for cid, amount in found.items():
+        lead = one(ctx.conn, "SELECT extra FROM leads WHERE lead_id=?", (cid,))
+        if lead:
+            extra = json.loads(lead["extra"] or "{}")
+            extra[key] = amount
+            ctx.conn.execute("UPDATE leads SET extra=? WHERE lead_id=?", (json.dumps(extra), cid))
+    ctx.conn.commit()
+    return len(found)
 
 
 def _store_payout_details(ctx: Ctx, path: Path, ids: list[str]) -> None:
@@ -173,7 +206,9 @@ def batch_workbook(ctx: Ctx, upload: dict) -> Workbook:
     ws.append(head)
     for r in data:
         ws.append([r.get(k, "") for _, k in BATCH_COLUMNS])
-    widths = [8, 8, 10, 8, 13, 16, 13, 26, 16, 14, 16, 16, 15, 13, 10, 12, 13, 46, 36, 13, 16, 12, 46, 48, 60, 70, 60, 10]
+    widths = [24 if k in {"call_ideas_text", "objections_hi", "levers", "core_detail", "heat_reasons"} else 13
+              for _, k in BATCH_COLUMNS]
+    widths = [70 if k == "call_ideas_text" else w for w, (_, k) in zip(widths, BATCH_COLUMNS)]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     for c in ws[1]:

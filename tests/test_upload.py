@@ -105,7 +105,7 @@ def test_reactivation_list_only_engaged_customers_go_to_gms(ctx, tmp_path):
     assert tags["KNOWN"][1] is None             # cold and never worked by its GM: released back to watching
     assert (s["watching"], s["waiting"], s["released_to_watching"]) == (2, 0, 1)
     rows_ = {r["client"]: r for r in build_rows(ctx)}
-    assert rows_["QUIET"]["gm"] == "Waiting for engagement (re-activation)" and rows_["QUIET"]["list"] == "Re-activation"
+    assert rows_["QUIET"]["gm"] == "Waiting for engagement (re-activation)" and rows_["QUIET"]["list"] == "Churned, active again"
     assert "Re-activation list: engaged in the app again" in rows_["ENGAGED"]["levers"]
 
     # QUIET starts using the app: on the next sync it is scored up and handed to a GM

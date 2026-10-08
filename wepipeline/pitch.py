@@ -51,6 +51,15 @@ PLAYBOOKS = {
             "Offer a quick walkthrough of tools such as alerts, screeners and the research desk",
         ],
     },
+    "low_margin": {
+        "goal": "Top up to the funded-account target (₹30,000)",
+        "opener": "Thanks for funding your account. Most Sarthi ideas need a little more margin; shall we top it up?",
+        "points": [
+            "Show the gap to ₹30,000 and what it unlocks (more Sarthi ideas at once)",
+            "UPI top-up on the call takes two minutes",
+            "If not the full amount today, book the rest as a follow-up",
+        ],
+    },
     "payout": {
         "goal": "Keep the relationship (and part of the funds, if they choose) while the payout goes through",
         "opener": "I'm calling about the withdrawal you requested. It's being processed as normal; I just wanted to check "
@@ -183,12 +192,12 @@ for funds added to the account (margin). The firm offers discount brokerage pric
 alerts included, and a dedicated Relationship Manager for customers who find managing trades difficult. If a Sarthi track record is provided, quote it exactly as given (it includes
 stop-losses) followed by its disclaimer; never quote other figures or individual wins that are not provided.
 
-Write a short call plan for the caller from the customer facts provided:
-- Opener: one or two sentences that reference what the customer actually did in the app.
-- Three or four talking points tailored to their stage and activity.
-- The most likely objection, with a one-line response.
-- A clear close: the single next action to ask for on this call.
-Keep it under 170 words, in plain English the caller can read aloud. Markdown bullets are fine.
+Give the caller ideas, not a script: they will use their own words. Write in Hinglish (Hindi in Roman script mixed
+with English, the way Indian sales teams talk), for example "Sarthi ke 4 ideas accept kiye → puchho kaunsa pasand aaya".
+- 4 to 6 ideas, strongest first. Each one is a data point taken from the facts provided, then "→" and the angle to take.
+- Then "Agar customer bole:" with the two most likely objections and a one-line answer each.
+- Then the single goal of the call.
+Keep it under 150 words. Markdown bullets are fine.
 
 Compliance rules (SEBI): never recommend buying or selling a specific security, never promise or imply returns or \
 earnings (no "earn", "assured", "sure-shot"), \

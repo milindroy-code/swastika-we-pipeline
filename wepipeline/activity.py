@@ -8,7 +8,7 @@ from datetime import timedelta
 from .context import Ctx, iso, parse_dt
 from .db import rows
 
-STAGES = ["kyc_pending", "kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader", "payout"]
+STAGES = ["kyc_pending", "kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader", "payout", "low_margin"]
 INSTRUMENT_KEYS = ["symbol", "scrip", "stock", "instrument", "stock name", "scrip name", "ticker"]
 AMOUNT_KEYS = ["amount", "deposit amount", "value", "order value"]
 
@@ -89,6 +89,8 @@ def summarize(ctx: Ctx, lead: dict, days: int = 30) -> dict:
 def stage_for(ctx: Ctx, lead: dict, summary: dict) -> str:
     if lead.get("campaign") == "payout":  # a withdrawal request outranks everything else we know about the client
         return "payout"
+    if lead.get("campaign") == "low_margin":  # funded, but below the funded-account target
+        return "low_margin"
     known = json.loads(lead.get("extra") or "{}").get("stage")  # from the client database (deposit / trade dates)
     if known in STAGES:
         return known

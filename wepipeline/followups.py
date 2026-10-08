@@ -49,6 +49,7 @@ def log_call(
     notes: str = "",
     next_at: datetime | None = None,
     sarthi_activated: bool = False,
+    deposit_amount: float | None = None,
 ) -> dict:
     """Record a call, close the lead's pending follow-ups and schedule the next one per the rules.
     sarthi_activated: the GM switched Sarthi on for the customer during this call."""
@@ -65,9 +66,10 @@ def log_call(
 
     now = ctx.now()
     call_id = ctx.conn.execute(
-        "INSERT INTO calls (lead_id, agent_id, called_at, outcome, notes, next_followup_at, sarthi_activated) "
-        "VALUES (?,?,?,?,?,?,?) RETURNING id",
-        (lead_id, agent_id, iso(now), outcome, notes, iso(next_at), int(bool(sarthi_activated))),
+        "INSERT INTO calls (lead_id, agent_id, called_at, outcome, notes, next_followup_at, sarthi_activated, deposit_amount) "
+        "VALUES (?,?,?,?,?,?,?,?) RETURNING id",
+        (lead_id, agent_id, iso(now), outcome, notes, iso(next_at), int(bool(sarthi_activated)),
+         float(deposit_amount) if deposit_amount else None),
     ).fetchone()["id"]
     ctx.conn.execute(
         "UPDATE followups SET status='done', completed_at=?, call_id=? WHERE lead_id=? AND status='pending'",

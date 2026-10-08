@@ -76,6 +76,26 @@ All weights, tiers and SLAs live under `heat:` in `config.yaml`. The scale of 35
 Core activities are currently `ORDER_PLACED_MOB`, `CALL_ACCEPTED_MOB` and `RECOMMENDATION_LISTING_OPENED_MOB`.
 `DASHBOARD_OPENED_MOB` and `RECOMMENDATION_LANDING_SCREEN_MOB` are non-core. Adjust `heat.core_activities` to change this.
 
+## The four lists and the ₹30k goal
+
+The OKR is a **funded account at ₹30,000** (`funding_target`). Every funding conversation aims for it. SMs upload
+lists on Customer list, choosing one of:
+
+| List | Goal on the call |
+|---|---|
+| New clients without deposit | ₹30k deposit; if not today, a significant first step (`closing.fallback_amount`) with the rest booked as a top-up follow-up |
+| New clients with low margin (under ₹30k) | Top up to ₹30k. A margin / balance / deposit column in the file gives the exact gap |
+| Churned clients showing activity | Engage (only engaged ones go to GMs), then deposit and trades |
+| Clients who made payouts | Find and fix the reason; they stay invested and trade more. GMs may ask whether they'd like to cancel or reduce the request, but never delay or block a withdrawal |
+
+**Call ideas, not scripts, in Hinglish.** Each idea is a data point, then an angle ("Sarthi ke 4 ideas accept kiye
+→ puchho kaunsa pasand aaya…"). They're backed by Sarthi's real record and margins from `tblScripOrder` (e.g. "F&O idea
+ka typical margin ₹12,252, toh ₹30k mein ~2 ideas"), market notes, the client's preferred segment and app activity.
+Every card also has a **Swastika offer stack** (`propositions:` in config: add IPO, MTF, MF… with approved wording),
+a **🎯 Close** (an assumptive ₹30k ask, a fallback, and a booked top-up), and Hinglish objection handling. There's no
+false urgency and no promises; tests enforce both, in English and Hinglish. Logging **Converted** asks for the
+deposit amount, and reports count **Funded ≥ ₹30k**.
+
 ## Sarthi in every pitch
 
 Sarthi (ready trade ideas with entry, target and stop-loss in equity, F&O and commodities) leads every pitch.

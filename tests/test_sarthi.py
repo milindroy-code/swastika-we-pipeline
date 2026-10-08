@@ -68,7 +68,7 @@ def test_unfunded_research_user_gets_sarthi_and_margin_pitch(ctx):
     assert ins["opener"].endswith("The first step is switching on Sarthi so its ideas start reaching you.")
     assert any("add funds now (₹25,000)" in i for i in ideas)
     assert "Sarthi user: accepted 4 Sarthi idea(s)" in ins["levers"] and "Sarthi not activated: activate it on the call" in ins["levers"]
-    assert ins["next_action"].startswith("Sarthi activated + funds added on the call")
+    assert ins["next_action"].startswith("Sarthi activated + ₹25,000 deposit on the call")  # F&O starter amount override
     assert ins["sarthi_status"] == "not activated"
 
 
@@ -119,7 +119,7 @@ def test_unknown_status_asks_to_check_and_logged_activation_sticks(ctx):
     ins = customer_insight(ctx, lead)
     assert ins["sarthi_status"] == "unknown"
     assert "• Check Sarthi is activated (it's needed to receive the ideas); if not, activate it with them now" in ins["ideas"].split("\n")
-    assert ins["next_action"].startswith("Sarthi activated + funds added")
+    assert ins["next_action"].startswith("Sarthi activated + ₹30,000 deposit on the call")  # the funding target
 
     log_call(ctx, "S1", "gm_01", "interested", "Switched on Sarthi F&O", sarthi_activated=True)
     after = customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='S1'"))
@@ -146,6 +146,8 @@ def test_pull_track_from_research_db(ctx, monkeypatch):
     seen = {}
 
     def fake_query(c, sql):
+        if "OrderMargin" in sql and "GROUP BY" not in sql:  # the margin query
+            return pd.DataFrame([{"Segment": "F&O", "OrderMargin": m} for m in (7000, 12252, 15600)])
         seen["sql"] = sql
         return pd.DataFrame([{"Segment": "Commodity", "closed": 159, "profit": 103, "loss": 56, "target_hit": 16, "stoploss_hit": 32},
                              {"Segment": "F&O", "closed": 44, "profit": 26, "loss": 18, "target_hit": 7, "stoploss_hit": 11}])
@@ -157,6 +159,7 @@ def test_pull_track_from_research_db(ctx, monkeypatch):
     t = sarthi.track(ctx)
     assert t["highlights"] == ["F&O: approved example"] and t["disclaimer"] == "Custom disclaimer"  # admin's text kept
     assert t["source"].endswith("(auto)")
+    assert t["margins"]["F&O"]["median_margin"] == 12252 and t["margins"]["F&O"]["share_within_target"] == 1.0
 
 
 def test_blank_sarthi_flag_in_client_db_means_not_activated(ctx):
@@ -164,3 +167,101 @@ def test_blank_sarthi_flag_in_client_db_means_not_activated(ctx):
     info = classify(ctx, {"CLIENT_ID": "X", "REGISTRATION_DATE": NOW.replace(tzinfo=None), "IsSarthiTIOn": None})
     assert info["extra"]["sarthi_active"] is False
     assert classify(ctx, {"CLIENT_ID": "Y", "IsSarthiTIOn": True})["extra"]["sarthi_active"] is True
+
+
+HINGLISH_PROMISES = re.compile(r"(pakka (profit|munafa|return)|guaranteed? (kamaai|profit|return)|zaroor (kamaoge|profit)|"
+                               r"risk[- ]free|double ho jaayega|loss nahi hoga)", re.I)
+
+
+def test_call_ideas_are_data_points_with_angles_in_hinglish(ctx):
+    sarthi.save_track(ctx, "last 30 days", {"F&O": {"closed": 44, "profit": 26, "loss": 18}}, [], "Research desk", "")
+    lead = add_lead(ctx, "I1", {"stage": "kyc_no_deposit", "sarthi_active": False, "preferred_segment": "FNO",
+                                "registration_date": (NOW - timedelta(days=9)).isoformat()},
+                    [("ORDER_PLACED_MOB", 2), ("CALL_ACCEPTED_MOB", 4), ("RECOMMENDATION_LISTING_OPENED_MOB · fandoresearch", 6)])
+    ins = customer_insight(ctx, lead)
+    facts = [i["fact"] for i in ins["call_ideas"]]
+    assert facts[0].startswith("2 order try kiye bina funds ke")            # strongest data point first
+    assert any(f.startswith("Sarthi ke 4 ideas accept kiye") for f in facts)
+    assert "Sarthi activate nahi hai" in facts
+    assert "Sarthi F&O: last 30 din mein 44 mein se 26 ideas profit mein close hue, 18 loss mein" in facts
+    assert any("F&O research 6 baar dekha" in f for f in facts)              # 'fandoresearch' sheet name understood
+    assert len(ins["call_ideas"]) <= 6 and all(i["angle"] for i in ins["call_ideas"])
+    assert ins["call_ideas_text"].startswith("• 2 order try kiye bina funds ke")
+    assert "\"Kya trade karun, pata nahi\" →" in ins["objections_hi"]
+
+
+def test_payout_ideas_never_block_the_withdrawal(ctx):
+    lead = add_lead(ctx, "P9", {"payout_amount": 25000, "payout_date": NOW.isoformat()})
+    ctx.conn.execute("UPDATE leads SET campaign='payout' WHERE lead_id='P9'")
+    ins = customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='P9'"))
+    first = ins["call_ideas"][0]
+    assert first["fact"].startswith("₹25,000 ka payout request kiya")
+    assert first["angle"].startswith("Pehle bolo payout normal process hoga, koi rukawat nahi")
+    assert ins["objections_hi"].startswith("\"Paise ki zaroorat hai\" → Bilkul, payout normal process hoga")
+
+
+def test_no_promises_in_hinglish_ideas_either(ctx):
+    sarthi.save_track(ctx, "last 30 days", {"Equity": {"closed": 83, "profit": 59, "loss": 24}}, ["Equity: idea closed at target"], "x", "")
+    for i, stage in enumerate(["kyc_pending", "kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader"]):
+        ins = customer_insight(ctx, add_lead(ctx, f"H{i}", {"stage": stage, "holdings": 300000, "days_since_last_trade": 200},
+                                             [("ORDER_PLACED_MOB", 2), ("CALL_ACCEPTED_MOB", 1)]))
+        text = ins["call_ideas_text"] + " " + ins["objections_hi"]
+        assert not HINGLISH_PROMISES.search(text) and not PROMISES.search(text), text
+
+
+def test_close_asks_for_the_target_with_a_fallback_and_stacks_propositions(ctx):
+    lead = add_lead(ctx, "C1", {"stage": "kyc_no_deposit", "sarthi_active": False, "preferred_segment": "FNO"},
+                    [("CALL_ACCEPTED_MOB", 3)])
+    ins = customer_insight(ctx, lead)
+    close = ins["closing"]
+    assert close[0].startswith("Pehle Sarthi on karwao")
+    assert "₹30,000 abhi UPI se add kar dete hain?" in close[1]
+    assert "₹10,000 se shuru karte hain, baaki ₹20,000 kab tak?" in close[2]
+    names = [p.split(":")[0] for p in ins["propositions"]]
+    assert "Discount brokerage" in names and "Dedicated RM" not in names   # RM isn't pitched to a brand-new client
+    assert ins["closing_text"].startswith("• Pehle Sarthi on karwao")
+
+
+def test_payout_close_stays_soft(ctx):
+    lead = add_lead(ctx, "P2", {})
+    ctx.conn.execute("UPDATE leads SET campaign='payout' WHERE lead_id='P2'")
+    ins = customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='P2'"))
+    assert "Aapki marzi" in ins["closing"][0] and not any("UPI" in c for c in ins["closing"])
+    assert "payout normal hone do" in ins["closing"][1]                       # a "no" is respected
+    text = " ".join(ins["closing"]) + ins["call_ideas_text"]
+    assert not re.search(r"(rok(na|o|enge)|hold kar|delay|process nahi hoga)", text, re.I), text  # never block a payout
+    assert "Dedicated RM" in [p.split(":")[0] for p in ins["propositions"]]
+
+
+def test_no_false_urgency_in_the_close(ctx):
+    for i, stage in enumerate(["kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader"]):
+        ins = customer_insight(ctx, add_lead(ctx, f"U{i}", {"stage": stage}))
+        text = " ".join(ins["closing"] + ins["propositions"])
+        assert not re.search(r"(aaj hi khatam|last chance|offer expire|sirf aaj|limited time)", text, re.I), text
+        assert not HINGLISH_PROMISES.search(text) and not PROMISES.search(text), text
+
+
+def test_low_margin_client_is_pushed_to_top_up_to_the_target(ctx):
+    sarthi.save_track(ctx, "last 30 days", {"F&O": {"closed": 44, "profit": 26, "loss": 18}}, [], "x", "")
+    data = sarthi.track(ctx)
+    data["margins"] = {"F&O": {"ideas": 45, "median_margin": 12252, "share_within_target": 1.0, "per_share_margin": False}}
+    from wepipeline.db import set_setting
+    set_setting(ctx.conn, "sarthi_track", json.dumps(data), "x")
+    lead = add_lead(ctx, "LM1", {"current_margin": 8000, "preferred_segment": "FNO", "sarthi_active": True})
+    ctx.conn.execute("UPDATE leads SET campaign='low_margin' WHERE lead_id='LM1'")
+    ins = customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='LM1'"))
+    assert ins["stage"] == "low margin"
+    first = ins["call_ideas"][0]
+    assert first["fact"] == "Account mein abhi ~₹8,000 (target ₹30,000); Sarthi F&O idea ka typical margin ₹12,252, toh ₹30,000 mein ~2 ideas"
+    assert first["angle"].startswith("₹22,000 aur add karwao")
+    assert ins["closing"][0] == "Seedha poochho: \"₹22,000 abhi UPI se add karke ₹30,000 kar dete hain?\""
+    assert "Aaj ₹11,000, baaki kab?" in ins["closing"][1]
+    assert ins["next_action"].startswith("Top-up to ₹30,000 on the call")
+
+
+def test_churned_list_gets_the_deposit_push_even_if_recently_traded(ctx):
+    lead = add_lead(ctx, "CH1", {"stage": "active_trader", "sarthi_active": True})
+    ctx.conn.execute("UPDATE leads SET campaign='reactivation' WHERE lead_id='CH1'")
+    ins = customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='CH1'"))
+    assert "₹30,000 abhi UPI se add kar dete hain?" in ins["closing"][0]
+    assert any("₹30,000" in i["angle"] for i in ins["call_ideas"])

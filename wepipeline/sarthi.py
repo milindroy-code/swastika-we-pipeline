@@ -52,7 +52,7 @@ def save_track(ctx: Ctx, period: str, segments: dict[str, dict], highlights: lis
         if closed:
             clean[seg] = {"closed": closed, "profit": profit, "loss": loss,
                           **{k: int(v[k]) for k in ("target_hit", "stoploss_hit") if v.get(k) is not None}}
-    data = {"period": period.strip() or "last 30 days", "segments": clean,
+    data = {"period": period.strip() or "last 30 days", "segments": clean, "margins": track(ctx).get("margins", {}),
             "highlights": [h.strip() for h in highlights if h.strip()], "source": source.strip(),
             "disclaimer": disclaimer.strip() or DEFAULT_DISCLAIMER, "updated": iso(ctx.now())}
     set_setting(ctx.conn, "sarthi_track", json.dumps(data, ensure_ascii=False), iso(ctx.now()))
@@ -76,6 +76,22 @@ def track_line(ctx: Ctx, segment: str | None) -> str | None:
     return line
 
 
+def track_line_hi(ctx: Ctx, segment: str | None) -> str | None:
+    """Hinglish: 'Sarthi F&O: last 30 din mein 44 mein se 26 ideas profit mein close hue, 18 loss mein'."""
+    t = track(ctx)
+    segs = {k: v for k, v in t["segments"].items() if "profit" in v}
+    if segment in segs:
+        s, label = segs[segment], f"{name(ctx)} {segment}"
+    elif segs:
+        s = {k: sum(v[k] for v in segs.values()) for k in ("closed", "profit", "loss")}
+        label = name(ctx)
+    else:
+        return None
+    period = t["period"].replace("last ", "last ").replace(" days", " din")
+    line = f"{label}: {period} mein {s['closed']} mein se {s['profit']} ideas profit mein close hue"
+    return line + (f", {s['loss']} loss mein" if s["loss"] else "")
+
+
 def highlight_for(ctx: Ctx, segment: str | None) -> str | None:
     """An admin-approved example; lines may start with 'F&O:' / 'Equity:' / 'Commodity:' to target a segment."""
     lines = track(ctx)["highlights"]
@@ -86,10 +102,20 @@ def highlight_for(ctx: Ctx, segment: str | None) -> str | None:
     return next((h for h in lines if not any(h.lower().startswith(s.lower() + ":") for s in SEGMENTS)), None)
 
 
+def target(ctx: Ctx) -> int:
+    return int(ctx.cfg.get("funding_target") or 0)
+
+
 def starter_amount(ctx: Ctx, segment: str | None) -> str:
     amounts = (ctx.cfg.get("sarthi") or {}).get("starter_amount") or {}
-    amt = amounts.get(segment) or amounts.get("default")
+    amt = amounts.get(segment) or amounts.get("default") or target(ctx)
     return f"₹{int(amt):,}" if amt else "an amount they're comfortable with"
+
+
+def margin_facts(ctx: Ctx, segment: str | None) -> dict | None:
+    """Typical margin of recent Sarthi ideas in a segment, and how much of the flow the funding target covers."""
+    m = (track(ctx).get("margins") or {}).get(segment or "")
+    return m if m and m.get("ideas") else None
 
 
 # ---------------------------------------------------------------- official numbers from the research database
@@ -113,6 +139,15 @@ GROUP BY CASE WHEN InstrumentName = 'COMMODITY' THEN 'Commodity'
 """
 
 
+MARGIN_SQL = """
+SELECT CASE WHEN InstrumentName = 'COMMODITY' THEN 'Commodity'
+            WHEN SegmentName IN ('OPTIONS', 'FUTURES') THEN 'F&O' ELSE 'Equity' END AS Segment, OrderMargin
+FROM [ReplResearchPanelDB].[dbo].[tblScripOrder]
+WHERE MessageType = 'Recommendation' AND IsDeleted = 0
+  AND CreatedOn >= DATEADD(DAY, -{days}, CAST(GETDATE() AS DATE))
+"""
+
+
 def pull_track(ctx: Ctx, days: int | None = None) -> dict:
     """Recompute the track record from every closed Sarthi idea in the research database (read-only).
     Keeps the admin's approved examples and disclaimer."""
@@ -123,6 +158,22 @@ def pull_track(ctx: Ctx, days: int | None = None) -> dict:
     segments = {r["Segment"]: {k: int(r[k] or 0) for k in ("closed", "profit", "loss", "target_hit", "stoploss_hit")}
                 for r in df.to_dict("records")}
     old = track(ctx)
-    return save_track(ctx, f"last {days} days", segments, old["highlights"],
+    data = save_track(ctx, f"last {days} days", segments, old["highlights"],
                       f"[ReplResearchPanelDB].[dbo].[tblScripOrder]: every closed recommendation, last {days} days (auto)",
                       old["disclaimer"])
+    goal = target(ctx)
+    mdf = _query(ctx, MARGIN_SQL.format(days=days))
+    margins = {}
+    if not mdf.empty and {"Segment", "OrderMargin"} <= set(mdf.columns):
+        import pandas as pd
+
+        mdf["m"] = pd.to_numeric(mdf["OrderMargin"], errors="coerce")
+        for seg_name, g in mdf.groupby("Segment"):
+            vals = g["m"].dropna()
+            if len(vals):
+                margins[seg_name] = {"ideas": int(len(g)), "median_margin": float(vals.median()),
+                                     "share_within_target": float((vals <= goal).mean()) if goal else None,
+                                     "per_share_margin": seg_name == "Equity"}
+    data["margins"] = margins
+    set_setting(ctx.conn, "sarthi_track", json.dumps(data, ensure_ascii=False), iso(ctx.now()))
+    return data

@@ -36,8 +36,8 @@ COLUMNS = [
     ("Non-core actions", "non_core_actions"), ("Core activity (type × times, recency)", "core_detail"),
     ("Non-core activity", "non_core_detail"), ("Momentum", "momentum"), ("Best time to call", "best_time"),
     ("Research segments", "segments"), ("Sarthi status", "sarthi_status"), ("Why hot (score drivers)", "heat_reasons"),
-    ("Engagement levers", "levers"), ("Conversation opener", "opener"), ("Pitch ideas", "ideas"),
-    ("Next best action", "next_action"), ("Objection to expect", "objection"), ("Updated", "updated"),
+    ("Engagement levers", "levers"), ("Call ideas (data → angle)", "call_ideas_text"), ("Close", "closing_text"),
+    ("Next best action", "next_action"), ("Agar customer bole", "objections_hi"), ("Updated", "updated"),
 ]
 TIER_COLORS = {"🔥 Hot": {"red": 0.99, "green": 0.87, "blue": 0.85}, "🌤️ Warm": {"red": 1.0, "green": 0.95, "blue": 0.8},
                "❄️ Cold": {"red": 0.9, "green": 0.94, "blue": 0.99}}
@@ -77,7 +77,8 @@ def build_rows(ctx: Ctx, lead_id: str | None = None) -> list[dict]:
             "status": lead["status"],
             "gm": gm.get("name", ("Waiting for capacity" if engaged_enough(ctx, lead)
                                   else "Waiting for engagement (re-activation)") if lead["status"] == "open" else ""),
-            "list": {"new": "New, no deposit", "reactivation": "Re-activation", "payout": "Payout"}.get(lead.get("campaign") or "", ""),
+            "list": {"new": "New, no deposit", "low_margin": "Low margin", "reactivation": "Churned, active again",
+                     "payout": "Payout"}.get(lead.get("campaign") or "", ""),
             "sm": (ctx.member(ctx.sm_of(gm)) or {}).get("name", ""),
             "next_due": due.strftime("%d %b %H:%M") if due else "",
             "next_kind": KIND_LABELS.get(nxt["kind"], "") if nxt else "",

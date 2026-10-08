@@ -302,13 +302,17 @@ def urgency_strip(agent_id: str) -> None:
     c[3].metric("Due now", n["due_now"])
     pct = today_row.get("compliance_pct")
     c[4].metric("Calls today · on time", f"{today_row.get('calls', 0)} · {f'{pct:.0f}%' if pct is not None else 'n/a'}")
+    goal = int(ctx.cfg.get("funding_target") or 0)
+    if goal:
+        st.caption(f"🎯 Today: {today_row.get('funded_target', 0)} account(s) funded ≥ ₹{goal:,} · "
+                   f"₹{today_row.get('deposits', 0):,} deposited on your calls")
     if n["escalating_soon"]:
         st.error(f"⚠️ {n['escalating_soon']} follow-up(s) will be escalated to your SM within 15 minutes. They are first in line below.")
 
 
-def _log_and_advance(agent_id: str, lead_id: str, outcome: str, notes: str, next_at=None) -> None:
+def _log_and_advance(agent_id: str, lead_id: str, outcome: str, notes: str, next_at=None, deposit_amount=None) -> None:
     try:
-        res = log_call(ctx, lead_id, agent_id, outcome, notes, next_at)
+        res = log_call(ctx, lead_id, agent_id, outcome, notes, next_at, deposit_amount=deposit_amount)
     except ValueError as e:
         st.error(str(e))
         return
@@ -327,7 +331,9 @@ def _chip(text: str, color: str = "gray") -> str:
 
 
 STAGE_NAMES = {"kyc pending": "KYC pending", "kyc no deposit": "No deposit yet", "funded no trade": "Funded, no trade yet",
-               "dormant trader": "Dormant trader", "active trader": "Active trader", "payout": "💸 Payout requested"}
+               "dormant trader": "Dormant trader", "active trader": "Active trader", "payout": "💸 Payout requested",
+               "low margin": "Low margin (under ₹30k)"}
+LIST_LABELS = {"new": "New, no deposit", "low_margin": "Low margin", "reactivation": "Churned, active again", "payout": "Payout"}
 
 
 def _stage_line(ins: dict) -> str:
@@ -370,12 +376,14 @@ def call_card(agent_id: str, q: dict) -> None:
                   if last else "First call")]
         st.markdown("  ".join(_chip(f"{i} {t}", "blue") for i, t in facts if t))
 
-        # 3. the script: the only big block
-        st.markdown("**Say this:**")
-        st.success(ins["opener"])
-        points = [p.lstrip("• ").strip() for p in ins["ideas"].split("\n") if p.strip()][:3]
-        st.markdown("**Make these points:**  \n" + "  \n".join(f"{n}. {p}" for n, p in enumerate(points, 1)))
-        st.caption(f"**If they say** {ins['objection']}")
+        # 3. call ideas: what the data says, and an angle to take (the GM uses their own words)
+        st.markdown("**💡 Call ideas** · data → angle")
+        for n, idea in enumerate(ins["call_ideas"], 1):
+            st.markdown(f"{n}. :blue-background[{idea['fact']}] → {idea['angle']}")
+        if ins["propositions"]:
+            st.markdown("**🧰 Swastika ka offer stack** (jo fit ho, wahi bolo)  \n" + "  \n".join(f"• {p}" for p in ins["propositions"]))
+        st.markdown("**🎯 Close**  \n" + "  \n".join(f"{n}. {c}" for n, c in enumerate(ins["closing"], 1)))
+        st.caption("**Agar customer bole:** " + ins["objections_hi"])
 
         # 4. the rest, folded away
         with st.expander("More about this customer"):
@@ -392,6 +400,7 @@ def call_card(agent_id: str, q: dict) -> None:
                 if ins["levers"]:
                     st.markdown("**Why they'll listen**  \n" + ins["levers"].replace("\n", "  \n"))
                 st.markdown(f"**Goal:** {ins['next_action']}")
+                st.markdown(f"**English opener (if you need one):** {ins['opener']}")
             if ins["core_detail"] or ins["non_core_detail"]:
                 st.markdown(f"**In the app:** {ins['core_detail'] or ins['non_core_detail']}")
             history = rows(ctx.conn, "SELECT called_at, outcome, notes FROM calls WHERE lead_id=? ORDER BY called_at DESC LIMIT 5", (lid,))
@@ -457,6 +466,13 @@ def outcome_panel(agent_id: str, lead: dict) -> None:
         notes = st.text_input("What did they say? What did you promise?", key=f"notes_{lid}",
                               placeholder="e.g. Will add ₹5,000 by UPI tonight")
         when = None
+        deposit = None
+        if picked == "converted":
+            goal = int(ctx.cfg.get("funding_target") or 0)
+            deposit = st.number_input("Deposit amount (₹)", min_value=0, value=goal or 0, step=1000, key=f"dep_{lid}",
+                                      help=f"Funded-account target (OKR): ₹{goal:,}")
+            if goal and deposit and deposit < goal:
+                st.caption(f"Below the ₹{goal:,} target: schedule a top-up follow-up if they agreed to add more.")
         if picked in {"interested", "callback_requested"}:
             required = picked == "callback_requested"
             choice = st.pills("When should you call next?" + ("" if required else " (optional)"), WHEN_CHOICES,
@@ -471,7 +487,7 @@ def outcome_panel(agent_id: str, lead: dict) -> None:
                 st.error("The follow-up time must be in the future.")
             else:
                 st.session_state.pop(f"outcome_{lid}", None)
-                _log_and_advance(agent_id, lid, picked, notes, when)
+                _log_and_advance(agent_id, lid, picked, notes, when, deposit_amount=deposit)
 
 
 def dialer(agent_id: str) -> None:
@@ -639,9 +655,7 @@ def leads_page() -> None:
         return
     df = pd.DataFrame(leads)
     c_list, c0, c1, c2, c3 = st.columns(5)
-    lists = c_list.multiselect("List", ["new", "reactivation", "payout", ""],
-                               format_func=lambda v: {"new": "New, no deposit", "reactivation": "Re-activation",
-                                                      "payout": "Payout"}.get(v, "(none)"))
+    lists = c_list.multiselect("List", ["new", "low_margin", "reactivation", "payout", ""], format_func=lambda v: LIST_LABELS.get(v, "(none)"))
     tiers = c0.multiselect("Priority", ["hot", "warm", "cold"], format_func=TIER_BADGE.get)
     status = c1.multiselect("Status", sorted(df["status"].unique()), default=["open"])
     owner = c2.multiselect("GM", [m["id"] for m in ctx.callers()], format_func=lambda i: ctx.member(i)["name"])
@@ -653,8 +667,7 @@ def leads_page() -> None:
     view = view[view["campaign"].isin(lists)] if lists else view
     view = view.assign(GM=view.apply(lambda r: (ctx.member(r["assigned_to"]) or {}).get(
                            "name", "watching for engagement" if r["campaign"] == "reactivation" else "unassigned"), axis=1),
-                       List=view["campaign"].map(lambda v: {"new": "New, no deposit", "reactivation": "Re-activation",
-                                                            "payout": "Payout"}.get(v, "")),
+                       List=view["campaign"].map(lambda v: LIST_LABELS.get(v, "")),
                        priority=view["heat_tier"].map(TIER_BADGE.get))
     st.dataframe(view[["priority", "heat_score", "lead_id", "List", "name", "phone", "category", "status", "GM", "heat_reasons",
                        "npc_count", "last_outcome", "last_contact_at"]],
@@ -758,8 +771,12 @@ def upload_section() -> None:
     """SM uploads a list; the system scores, ranks, assigns and pitches it, and shows the results for that list."""
     st.subheader("📤 Analyse a new list")
     with st.container(border=True):
-        list_type = st.radio("① What is this list?", ["no_deposit", "reactivation", "payout"], format_func=lambda k: LIST_TYPES[k][0],
+        list_type = st.radio("① What is this list?", ["no_deposit", "low_margin", "reactivation", "payout"],
+                             format_func=lambda k: LIST_TYPES[k][0],
                              key="sm_list_type", horizontal=True, index=None)
+        if list_type == "low_margin":
+            st.caption("Low margin: clients who deposited less than ₹30k. Add a margin / balance / deposit column to the file "
+                       "and GMs see the exact top-up gap; otherwise the first deposit from the client database is used.")
         if list_type == "payout":
             st.caption("Payout: every customer goes to a GM first in line, with a 30-minute first call. The pitch is retention: "
                        "confirm the payout goes through as normal, ask why, and offer pricing, Sarthi or an RM. If the file has "
@@ -823,11 +840,12 @@ def upload_section() -> None:
                + (f" · {s['closed']} already closed (converted / not interested)" if s.get("closed") else ""))
     view = pd.DataFrame([{"Rank": r["batch_rank"], "Priority": r["priority"], "Heat": r["heat"], "Client code": r["client"],
                           "List": r["list"], "Category": r["category"], "GM": r["gm"], "First call due": r["next_due"], "Best time": r["best_time"],
-                          "Why": (r["levers"].split("\n")[0].lstrip("• ") if r["levers"] else ""), "Opener": r["opener"]}
+                          "Why": (r["levers"].split("\n")[0].lstrip("• ") if r["levers"] else ""),
+                          "Top call idea": (r["call_ideas"][0]["fact"] + " → " + r["call_ideas"][0]["angle"]) if r.get("call_ideas") else ""}
                          for r in data])
     view["Rank"] = pd.to_numeric(view["Rank"], errors="coerce").astype("Int64")
     st.dataframe(view, hide_index=True, width="stretch", height=420,
-                 column_config={"Opener": st.column_config.TextColumn(width="large"), "Why": st.column_config.TextColumn(width="medium")})
+                 column_config={"Top call idea": st.column_config.TextColumn(width="large"), "Why": st.column_config.TextColumn(width="medium")})
     buf = io.BytesIO()
     batch_workbook(ctx, up).save(buf)
     st.download_button("⬇️ Download the analysed list (.xlsx): scores, GM, levers and full pitch for every client", buf.getvalue(),

@@ -4,7 +4,8 @@ from pathlib import Path
 from wepipeline.db import open_ctx
 
 TABLES = ["followups", "calls", "events", "profiles", "activity_summary", "alerts", "notifications",
-          "ingested_files", "pitches", "job_runs", "settings", "leads"]
+          "ingested_files", "pitches", "job_runs", "settings", "uploads", "referrals", "referral_outcomes", "drive_campaigns", "drive_asks", "drive_members",
+          "campaign_engagement", "sarthi_activations", "client_scores", "leads"]
 
 
 def open_test_ctx(cfg: dict):
@@ -17,6 +18,7 @@ def open_test_ctx(cfg: dict):
     out["google_sheet"] = {**out.get("google_sheet", {}), "enabled": False}
     cfg["market"] = {"enabled": False}  # tests never call live market feeds
     cfg["sources"].setdefault("client_db", {})["server"] = ""  # ...nor the real client database
+    cfg.setdefault("referral", {})["scope"] = "all"  # tests drive every client; the scope has its own test
     ctx = open_ctx(cfg=cfg)
     if cfg["database_url"]:
         ctx.conn.execute(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE")

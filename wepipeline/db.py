@@ -140,6 +140,108 @@ CREATE TABLE IF NOT EXISTS job_runs (
     PRIMARY KEY (job, day)
 );
 
+-- Friends a client referred on a referral-ask call (taken with the friend's consent).
+CREATE TABLE IF NOT EXISTS referrals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    referrer_id TEXT NOT NULL,
+    agent_id    TEXT,
+    name        TEXT,
+    phone       TEXT,
+    raw         TEXT,
+    created_at  TEXT NOT NULL
+);
+
+
+
+
+-- Drive programs (referral asks, Sarthi activation; see wepipeline/drives.py).
+CREATE TABLE IF NOT EXISTS drive_campaigns (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    program     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    started_at  TEXT NOT NULL,
+    ended_at    TEXT,
+    started_by  TEXT
+);
+
+-- A client's place in a drive program. One client can be in several programs (referral pool and Sarthi list) at
+-- once; each membership has its own status, GM, score and next try. Funding lists (leads.status='open') come first.
+CREATE TABLE IF NOT EXISTS drive_members (
+    program         TEXT NOT NULL,
+    lead_id         TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'open',  -- open / referred / activated / not_interested / unreachable / invalid / out_of_window
+    assigned_to     TEXT,
+    assigned_at     TEXT,
+    heat_score      REAL NOT NULL DEFAULT 0,
+    heat_tier       TEXT NOT NULL DEFAULT 'cold',
+    heat_reasons    TEXT,
+    npc_count       INTEGER NOT NULL DEFAULT 0,
+    last_outcome    TEXT,
+    last_contact_at TEXT,
+    next_at         TEXT,
+    asked_at        TEXT,
+    drive_at        TEXT,
+    campaign_id     INTEGER,
+    segment         TEXT,                          -- client type: new / active / resurrected
+    joined_at       TEXT,
+    updated_at      TEXT,
+    PRIMARY KEY (program, lead_id)
+);
+
+-- Every ask handed to a GM in a drive (one row per client per drive).
+CREATE TABLE IF NOT EXISTS drive_asks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    program     TEXT NOT NULL,
+    campaign_id INTEGER NOT NULL,
+    lead_id     TEXT NOT NULL,
+    agent_id    TEXT NOT NULL,
+    assigned_at TEXT NOT NULL,
+    returned_at TEXT                     -- taken back to the pool uncalled (drive / campaign ended)
+);
+
+-- Engagement with a program's channel campaigns (WhatsApp, SMS, email, push...), one row per client, campaign,
+-- channel, action and day, so overlapping uploads replace rather than add up.
+-- A score from the client's previous app history, uploaded by the SM (Customer list, step 4); blended into heat.
+CREATE TABLE IF NOT EXISTS client_scores (
+    client_id   TEXT PRIMARY KEY,
+    score       REAL NOT NULL,
+    raw         TEXT,
+    source_file TEXT,
+    uploaded_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS campaign_engagement (
+    program     TEXT NOT NULL,
+    user_id     TEXT NOT NULL,
+    campaign    TEXT NOT NULL,
+    channel     TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    day         TEXT NOT NULL,
+    count       INTEGER NOT NULL DEFAULT 1,
+    source_file TEXT,
+    UNIQUE(program, user_id, campaign, channel, action, day)
+);
+
+-- Sarthi switched on, from the client database (SarthiActivationDate); how Sarthi drives count success.
+CREATE TABLE IF NOT EXISTS sarthi_activations (
+    client_id    TEXT PRIMARY KEY,
+    activated_at TEXT,
+    updated_at   TEXT
+);
+
+-- Clients who joined through a referral (CRM lead source 37), refreshed from the client database.
+CREATE TABLE IF NOT EXISTS referral_outcomes (
+    referred_id   TEXT PRIMARY KEY,
+    referrer_id   TEXT NOT NULL,
+    lead_ref      TEXT,
+    authorized_at TEXT,
+    first_trade   TEXT,
+    first_deposit REAL,
+    holdings      REAL,
+    last_trade    TEXT,
+    updated_at    TEXT
+);
+
 -- Lists uploaded by SMs for analysis (Customer list page).
 CREATE TABLE IF NOT EXISTS uploads (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,8 +263,12 @@ CREATE TABLE IF NOT EXISTS settings (
 # Columns added after the first release, so existing databases are upgraded in place.
 LATER_COLUMNS = {
     "leads": {"heat_score": "REAL NOT NULL DEFAULT 0", "heat_tier": "TEXT NOT NULL DEFAULT 'cold'", "heat_reasons": "TEXT",
-              "campaign": "TEXT NOT NULL DEFAULT ''"},  # list the lead belongs to, e.g. 'reactivation'
-    "calls": {"sarthi_activated": "INTEGER NOT NULL DEFAULT 0", "deposit_amount": "REAL"},
+              "campaign": "TEXT NOT NULL DEFAULT ''",  # list the lead belongs to, e.g. 'reactivation'
+              "on_hold": "INTEGER NOT NULL DEFAULT 0"},  # 1 = in an uploaded list the SM has not assigned yet
+    "drive_members": {"segment": "TEXT"},
+    "referral_outcomes": {"last_trade": "TEXT"},  # client type in a drive: new / active / resurrected
+    "calls": {"sarthi_activated": "INTEGER NOT NULL DEFAULT 0", "deposit_amount": "REAL",
+              "program": "TEXT"},  # set for drive calls (referral / sarthi); NULL = the funding work
 }
 
 

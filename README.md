@@ -119,8 +119,11 @@ re-activate, or mixed). The system then:
 1. Reads every sheet, skips totals rows such as "Others", creates clients for new client codes and loads their activity.
 2. Looks each client up in the client database when it's reachable (office network). A 3-second check skips it
    otherwise, and the list type sets the pitch instead.
-3. Scores, ranks and assigns hot clients first within GM capacity, and builds every customer's opener, levers and pitch.
-4. Shows the results for that file (rank, priority, GM, first-call time, why, opener) and offers the analysed list as Excel.
+3. Scores and ranks every client, and builds their opener, levers, pitch and simple call script (insight, script, ask).
+4. Shows the results for that file (rank, priority, why, top call idea) and offers the analysed list as Excel.
+5. Nobody goes to a GM yet: the SM checks the results and presses **✅ Assign to GMs**. Payouts and 🔥 hot clients go
+   first within GM capacity; clients a GM already has stay with them. Until then the list is on hold, and the hourly
+   sync and **Sync now** skip it.
 
 Every upload is kept, so earlier lists can be reopened from "Results for".
 
@@ -225,6 +228,69 @@ Each client has a rule-based pitch built from its stage, app activity and market
 (`ANTHROPIC_API_KEY`), the **AI pitch** tab writes a tailored one with Claude. Only the client's first name, category,
 activity and call notes are sent: no phone number, email or client code. The prompt forbids security-specific
 recommendations and return promises.
+
+## Referral drives (separate dashboard)
+
+Referrals run on their own dashboard: `streamlit run referral_app.py --server.port 8503` (link at the bottom of
+**Customer list**). They are a drive the SM starts when they want one, not a continuous queue. Referral asks never
+enter the main dialer, follow-up SLAs, warnings, escalations or the compliance and Excel reports.
+
+**Who gets asked.** The pool is built from up to three sources, each a query pull (office network) or an upload of the
+query's output:
+- **Most active traders:** cash and F&O trades in the last 60 days. The Medium, High and Very High buckets join
+  (`wepipeline/referral.py: REFERRAL_SQL`).
+- **Past referrers:** CRM leads with source 37, rolled up per referrer as referred, made a first trade, and funded
+  (`HISTORY_SQL`; LeadSubSource is the referring client's code, confirmed by the Growth team).
+- **Campaign engagement:** referral campaigns on any channel. Opens, clicks, replies, shares and opt-outs, in long or wide
+  form. Rows are kept per client, campaign, channel, action and day, so re-uploads don't double count.
+
+**Score (0-100, same 🔥 ≥ 70 / 🌤️ ≥ 40 tiers).**
+- Base: trading volume (square-root curve), consistency and recency, plus app heat and past referrals that traded.
+- Campaign engagement is scored on its own. Shares and interest count more than replies, replies more than clicks,
+  clicks more than opens. Fresher engagement counts more, and opt-outs count against.
+- Final score: the higher of the two plus a quarter of the other. A client who shared the campaign link yesterday is
+  hot even with no trades. Weights are in `config.yaml: referral.score / referral.engagement`.
+
+**Rules.**
+- Clients on a payout, funding or re-activation list are left to that call first.
+- A client is asked at most once every 60 days (Admin: rules).
+- A "no" is final. Three not-picked-up calls drop the ask.
+- Calls are suggested from 15:45, after the market close.
+
+**Reward.** The amounts are set on Admin: rules (to the referrer and to the friend, paid after the friend's first
+trade). Until they are set, GMs are told not to quote or promise any amount.
+
+**GMs** work **My referral calls**. Each card shows why the client is on the list, Hinglish talking points and the ask.
+"🤝 Gave referral(s)" records the friends' names and numbers, taken only with the friend's consent.
+
+**SMs** see:
+- The pool and drive numbers.
+- A campaign table: engaged → hot / warm / cold → called → gave referrals.
+- The friends collected, with a CSV download. These are leads, not yet registered.
+
+## Sarthi activation drives (separate dashboard)
+
+`streamlit run sarthi_app.py --server.port 8504`. The target list is clients with **Sarthi off** in the client
+database (`IsSarthiTIOn` not 1) and an open account, drawn from three sources:
+- **Traders:** the trade query joined to the Sarthi flag, Low activity and up.
+- **App users:** app heat ≥ 20, or any Sarthi interest.
+- **Campaign engagement:** clients who engaged with an uploaded Sarthi channel campaign.
+
+**Score.** The strongest of three tracks, plus a quarter of the other two:
+- **Activity:** trading plus app use.
+- **Sarthi interest:** accepted or opened Sarthi ideas with the switch off. Fresher counts more.
+- **Campaign engagement.**
+
+**Success.** Sarthi switched on (`SarthiActivationDate`) after the campaign started. It is credited to the GM who
+called before the switch-on, or comes from the GM's "⚡ Activated" on the call. The rest switched on without a call.
+
+The list refreshes every 24 h, from the dashboard or with `python run.py sarthi-pool` (`--force` to refresh now).
+
+**Shared engine.** Referral and Sarthi drives run on `wepipeline/drives.py`, with campaigns, drives, channel-engagement
+uploads, scoring tracks and reports. A client can be on several drive lists at once (`drive_members`, one row per
+program), but is handed to a GM in only one drive at a time. Clients on a funding, payout or re-activation list are
+left to that call: those calls already ask for Sarthi. Drive calls are tagged `calls.program` and never count in the
+funding compliance or Excel reports.
 
 ## Before going live
 

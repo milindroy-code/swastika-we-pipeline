@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .context import Ctx, iso, parse_dt
+from .context import Ctx, iso, norm_client_id, parse_dt
 from .db import one, rows
 
 LEAD_FIELDS = ["lead_id", "we_user_id", "name", "phone", "email", "category", "source", "remarks"]
@@ -283,14 +283,12 @@ def _ingest_frame(ctx: Ctx, df: pd.DataFrame, sheet: str, path: Path) -> tuple[s
                           [("phone", phone_col), ("email", email_col), ("name", name_col), ("category", category_col)]}
 
     def qualified(event: str) -> str:
-        # Several sheets can share one event (equity / F&O / commodity research); keep them apart by sheet name.
-        generic = not sheet or sheet.lower() == event.lower() or sheet.lower().startswith("sheet")
-        return event if generic else f"{event} · {sheet}"
+        return event_key(event, sheet)
 
     if activity_col and buckets:
         kind = "activity"  # WebEngage pivot: one row per user, one column per hour/day with the count
         for r in df.to_dict("records"):
-            uid, event = str(r[user_col]).strip(), str(r[activity_col]).strip()
+            uid, event = norm_client_id(r[user_col]), str(r[activity_col]).strip()
             if not uid or not event or uid.lower() in ignored:
                 continue
             activity = qualified(event)
@@ -312,7 +310,7 @@ def _ingest_frame(ctx: Ctx, df: pd.DataFrame, sheet: str, path: Path) -> tuple[s
     elif activity_col and (count_col or days_col or type_col):
         kind = "activity"  # one row per user x activity with a count and/or last-done date
         for r in df.to_dict("records"):
-            uid, activity = str(r[user_col]).strip(), str(r[activity_col]).strip()
+            uid, activity = norm_client_id(r[user_col]), str(r[activity_col]).strip()
             if not uid or not activity:
                 continue
             last = parse_dt(r[last_col], ctx.tz) if last_col else None
@@ -329,7 +327,7 @@ def _ingest_frame(ctx: Ctx, df: pd.DataFrame, sheet: str, path: Path) -> tuple[s
         kind = "events"
         skip = {user_col, event_col, time_col}
         for r in df.to_dict("records"):
-            uid = str(r[user_col]).strip()
+            uid = norm_client_id(r[user_col])
             ts = parse_dt(r[time_col], ctx.tz)
             if not uid or not r[event_col] or not ts:
                 continue
@@ -344,7 +342,7 @@ def _ingest_frame(ctx: Ctx, df: pd.DataFrame, sheet: str, path: Path) -> tuple[s
     else:
         kind = "profiles"
         for r in df.to_dict("records"):
-            uid = str(r[user_col]).strip()
+            uid = norm_client_id(r[user_col])
             if not uid or uid.lower() in ignored:
                 continue
             remember(r, uid)
@@ -352,6 +350,38 @@ def _ingest_frame(ctx: Ctx, df: pd.DataFrame, sheet: str, path: Path) -> tuple[s
             _upsert_profile(ctx, uid, r.get(phone_col) if phone_col else "", r.get(email_col) if email_col else "", attrs)
             count += 1
     return kind, count, users
+
+
+def event_key(event: str, sheet: str | None) -> str:
+    """Several sheets can share one event (equity / F&O / commodity research): keep them apart by segment.
+    Sheet names vary between exports ('fando_research' vs 'fandoresearch'), so the segment is normalised;
+    otherwise the same hours from two overlapping exports would be stored, and counted, twice."""
+    from .pitch import segment_label
+
+    if not sheet or sheet.lower() == event.lower() or sheet.lower().startswith("sheet"):
+        return event
+    label = segment_label(sheet)
+    return event if not label or label == "Research home" else f"{event} · {label}"
+
+
+def merge_event_aliases(ctx: Ctx) -> int:
+    """One-off clean-up of events stored under raw sheet names before they were normalised."""
+    merged = 0
+    for r in rows(ctx.conn, "SELECT DISTINCT event_name FROM events WHERE event_name LIKE '% · %'"):
+        old = r["event_name"]
+        base, _, sheet = old.partition(" · ")
+        new = event_key(base, sheet)
+        if new == old:
+            continue
+        ctx.conn.execute("""DELETE FROM events WHERE event_name=? AND EXISTS (SELECT 1 FROM events e2 WHERE e2.event_name=?
+                            AND e2.user_id=events.user_id AND e2.event_time=events.event_time)""", (old, new))
+        ctx.conn.execute("UPDATE events SET event_name=? WHERE event_name=?", (new, old))
+        ctx.conn.execute("""DELETE FROM activity_summary WHERE activity=? AND EXISTS (SELECT 1 FROM activity_summary a2
+                            WHERE a2.activity=? AND a2.user_id=activity_summary.user_id)""", (old, new))
+        ctx.conn.execute("UPDATE activity_summary SET activity=? WHERE activity=?", (new, old))
+        merged += 1
+    ctx.conn.commit()
+    return merged
 
 
 def ingest_webengage_file(ctx: Ctx, path: Path, create_from_profiles: bool = False, category: str | None = None) -> dict:

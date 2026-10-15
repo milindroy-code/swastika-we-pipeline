@@ -52,12 +52,32 @@ PLAYBOOKS = {
         ],
     },
     "low_margin": {
-        "goal": "Top up to the funded-account target (₹30,000)",
+        "goal": "Top up to the funded-account target",
         "opener": "Thanks for funding your account. Most Sarthi ideas need a little more margin; shall we top it up?",
         "points": [
-            "Show the gap to ₹30,000 and what it unlocks (more Sarthi ideas at once)",
+            "Show the gap to the funded-account target and what it unlocks (more Sarthi ideas at once)",
             "UPI top-up on the call takes two minutes",
             "If not the full amount today, book the rest as a follow-up",
+        ],
+    },
+    "sarthi_activation": {
+        "goal": "Switch Sarthi on with the client on this call",
+        "opener": "I noticed Sarthi isn't switched on for your account yet. It sends ready trade ideas with entry, target and "
+                  "stop-loss straight to the app; can I show you and switch it on with you now?",
+        "points": [
+            "Show what an idea looks like: entry, target, stop-loss; they choose which to take",
+            "Quote the complete track record as it is; past results don't guarantee future ones",
+            "Switch it on together in the app while on the call",
+        ],
+    },
+    "referral": {
+        "goal": "Thank an active trader and ask for one or two referrals (with the friend's consent)",
+        "opener": "Thank you for trading so actively with Swastika. I'm your Growth Manager; I wanted to hear how it's going "
+                  "and ask a small favour.",
+        "points": [
+            "Thank them first and ask for feedback; fix anything that bothers them before asking",
+            "Ask for one or two friends or family who trade or want to start; take a number only if the friend agrees",
+            "Tell them what the friend gets: discount brokerage, Sarthi trade ideas, help getting started",
         ],
     },
     "payout": {

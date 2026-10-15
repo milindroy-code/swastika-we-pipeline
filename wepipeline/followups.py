@@ -8,6 +8,8 @@ from .context import Ctx, iso, parse_dt
 from .db import one, rows
 
 # npc: counts as a not-picked-up attempt; status: closes the lead; needs_time: a callback time is required.
+DRIVE_PROGRAMS = ("referral", "sarthi")  # leads.campaign values run as drives on their own dashboards
+
 OUTCOMES = {
     "not_picked": {"label": "Not picked up (NPC)", "npc": True},
     "busy": {"label": "Busy / disconnected", "npc": True},
@@ -16,6 +18,8 @@ OUTCOMES = {
     "interested": {"label": "Connected: interested"},
     "connected": {"label": "Connected: needs another follow-up"},
     "converted": {"label": "Converted (deposited / traded)", "status": "converted"},
+    "referral_given": {"label": "Gave referral(s)", "status": "referred"},
+    "activated": {"label": "Sarthi activated on the call", "status": "activated"},
     "not_interested": {"label": "Not interested", "status": "not_interested"},
     "wrong_number": {"label": "Wrong number", "status": "invalid"},
 }
@@ -63,6 +67,8 @@ def log_call(
     lead = one(ctx.conn, "SELECT * FROM leads WHERE lead_id=?", (lead_id,))
     if not lead:
         raise ValueError(f"Unknown client {lead_id}")
+    program = lead.get("campaign") or ""
+    referral_ask = program in DRIVE_PROGRAMS  # a referral / Sarthi drive ask: own dashboard, no SLA or escalation
 
     now = ctx.now()
     call_id = ctx.conn.execute(
@@ -77,29 +83,85 @@ def log_call(
     )
 
     npc_count = lead["npc_count"] + 1 if spec.get("npc") else 0
+    last = parse_dt(lead.get("last_contact_at"), ctx.tz)
+    if spec.get("npc") and lead["npc_count"] and last and now - last < timedelta(hours=1):
+        npc_count = lead["npc_count"]  # tried again within the hour: the same attempt, not a new one
     status = spec.get("status", "open")
     next_followup = None
 
-    if spec.get("npc"):
+    extra = json.loads(lead.get("extra") or "{}")
+    goal = int(ctx.rules.get("funding_target") or ctx.cfg.get("funding_target") or 0)
+    if spec.get("npc") and referral_ask:  # a good client we only want a favour from: a few tries, then let it be
+        from .drives import program_settings
+
+        if npc_count >= program_settings(ctx, program)["max_attempts"]:
+            status = "unreachable"
+        else:
+            retry = now + timedelta(hours=ctx.rules.get("npc_retry_hours", 4))
+            next_followup = (ctx.roll_to_working_hours(retry), "npc_retry", f"Drive ask, NPC {npc_count}: retry")
+    elif spec.get("npc"):
         max_attempts = ctx.rules.get("max_npc_attempts", 6)
         if npc_count >= max_attempts:
-            status = "unreachable"
-            _alert_manager(ctx, lead, agent_id, "info", f"{lead['name'] or lead_id} marked unreachable after {npc_count} NPC attempts")
+            if not extra.get("unreachable_revisited"):  # one more round after a pause, then stop
+                extra["unreachable_revisited"] = True
+                npc_count = 0
+                revisit = now + timedelta(days=int(ctx.rules.get("unreachable_revisit_days", 7)))
+                next_followup = (ctx.roll_to_working_hours(revisit), "system", f"Unreachable after {max_attempts} NPCs: one more round")
+                _alert_manager(ctx, lead, agent_id, "info", f"{lead['name'] or lead_id}: {max_attempts} NPCs, paused; retried in "
+                               f"{int(ctx.rules.get('unreachable_revisit_days', 7))} days")
+            else:
+                status = "unreachable"
+                _alert_manager(ctx, lead, agent_id, "info", f"{lead['name'] or lead_id} marked unreachable after a second round of NPCs")
         else:
             retry = now + timedelta(hours=ctx.rules.get("npc_retry_hours", 4))
             next_followup = (ctx.roll_to_working_hours(retry), "npc_retry", f"NPC attempt {npc_count}: retry")
 
+    if outcome == "converted" and goal:
+        # the GM enters the money added on this call; it adds to what the account already had
+        total = float(deposit_amount or 0) + float(extra.get("current_margin") or 0)
+        extra["current_margin"] = total
+        if total < goal:  # some (or unconfirmed) funding, not yet the target: keep following up
+            status = "open"
+            if (lead.get("campaign") or "") in {"", "new", "low_margin"}:  # re-activation / payout keep their list
+                ctx.conn.execute("UPDATE leads SET campaign='low_margin' WHERE lead_id=?", (lead_id,))
+            if not next_at:
+                next_at = ctx.roll_to_working_hours(now + timedelta(hours=float(ctx.rules.get("default_followup_hours", 24))))
+            notes = notes or f"Top up from ₹{total:,.0f} to ₹{goal:,}"
+    if referral_ask and not spec.get("npc"):  # asked (whatever the answer): don't ask again within the cooldown
+        extra.setdefault(program, {})["asked_at"] = iso(now)
+    if outcome == "not_interested" and not referral_ask:  # a 'no' to a referral ask is final until the next cooldown
+        if not extra.get("not_interested_once"):  # one more try after a pause; a second 'not interested' closes
+            extra["not_interested_once"] = True
+            status = "open"
+            revisit = now + timedelta(days=int(ctx.rules.get("not_interested_revisit_days", 7)))
+            next_followup = (ctx.roll_to_working_hours(revisit), "system", "Said not interested: one more try")
+    if not spec.get("npc") and outcome not in {"not_interested", "wrong_number"}:
+        extra.pop("unreachable_revisited", None)  # reached them: a later run of NPCs starts afresh
+    if outcome in {"interested", "connected", "callback_requested", "converted"}:
+        extra.pop("not_interested_once", None)
+    if outcome in {"interested", "connected"} and not next_at:  # spoke to them, no time agreed: never leave them waiting
+        next_at = ctx.roll_to_working_hours(now + timedelta(hours=float(ctx.rules.get("default_followup_hours", 24))))
+        notes = notes or "Follow up (no time agreed)"
+
     if next_at and status == "open":
         next_followup = (next_at, "promised", notes.strip()[:200] or "Promised callback")
+    if referral_ask:  # referral drives run on their own dashboard: no SLA, no escalation, just the next try
+        ref = extra.setdefault(program, {})
+        if next_followup and status == "open":
+            ref["next_at"] = iso(next_followup[0])
+        else:
+            ref.pop("next_at", None)
+        next_followup = None
 
     ctx.conn.execute(
         "UPDATE leads SET status=?, npc_count=?, last_contact_at=?, last_outcome=?, updated_at=? WHERE lead_id=?",
         (status, npc_count, iso(now), outcome, iso(now), lead_id),
     )
+    if outcome == "activated":
+        sarthi_activated = True
     if sarthi_activated:
-        extra = json.loads(lead.get("extra") or "{}")
         extra.update(sarthi_active=True, sarthi_activated_on=iso(now), sarthi_activated_by=agent_id)
-        ctx.conn.execute("UPDATE leads SET extra=? WHERE lead_id=?", (json.dumps(extra), lead_id))
+    ctx.conn.execute("UPDATE leads SET extra=? WHERE lead_id=?", (json.dumps(extra), lead_id))
     ctx.conn.commit()
     if next_followup:
         add_followup(ctx, lead_id, agent_id, *next_followup)
@@ -107,11 +169,34 @@ def log_call(
             "next_due": iso(next_followup[0]) if next_followup else None}
 
 
+def expire_out_of_window(ctx: Ctx) -> int:
+    """New and low-margin clients are worked within the registration window. Past it (and not funded at the target)
+    they move to 'out of window' and their follow-ups stop. Re-activation and payout clients are not bound by it."""
+    from .sarthi import window_days
+
+    limit = window_days(ctx)
+    expired = 0
+    for lead in rows(ctx.conn, "SELECT lead_id, extra, campaign, category FROM leads WHERE status='open' "
+                               "AND COALESCE(campaign,'') NOT IN ('reactivation','payout','referral','sarthi')"):
+        extra = json.loads(lead["extra"] or "{}")
+        reg = parse_dt(extra.get("registration_date"), ctx.tz)
+        is_new = lead["campaign"] in {"new", "low_margin"} or (lead["category"] or "").startswith(("New - no deposit", "No deposit"))
+        if not (is_new and reg) or (ctx.now().date() - reg.date()).days <= limit:
+            continue
+        ctx.conn.execute("UPDATE leads SET status='out_of_window', updated_at=? WHERE lead_id=?", (iso(ctx.now()), lead["lead_id"]))
+        ctx.conn.execute("UPDATE followups SET status='cancelled', completed_at=?, reason=COALESCE(reason,'') || ' (out of the registration window)' "
+                         "WHERE lead_id=? AND status='pending'", (iso(ctx.now()), lead["lead_id"]))
+        expired += 1
+    ctx.conn.commit()
+    return expired
+
+
 def reroll_outside_hours(ctx: Ctx) -> int:
     """Move future follow-ups that now fall outside working hours (e.g. after the start time changed)
     to the next working start, so they don't all turn overdue the moment the day begins."""
     moved = 0
-    for f in rows(ctx.conn, "SELECT id, due_at FROM followups WHERE status='pending' AND due_at > ?", (iso(ctx.now()),)):
+    for f in rows(ctx.conn, "SELECT id, due_at FROM followups WHERE status='pending' AND due_at >= ? AND warned_at IS NULL",
+                  (iso(ctx.now() - timedelta(minutes=1)),)):
         due = parse_dt(f["due_at"], ctx.tz)
         rolled = ctx.roll_to_working_hours(due)
         if rolled != due:
@@ -129,7 +214,21 @@ def reassign_lead(ctx: Ctx, lead_id: str, agent_id: str) -> None:
 
 
 def queue_for(ctx: Ctx, agent_id: str) -> list[dict]:
-    """Pending follow-ups for a GM, hottest leads first, then earliest due."""
+    """One entry per client for a GM (its earliest pending follow-up), hottest first, then earliest due.
+    A client can hold several pending follow-ups (a promised callback plus an earlier one pulled forward by
+    app activity); one call closes them all, so the dialer shows the client once, with the others as notes."""
+    out, seen = [], {}
+    for f in _pending_rows(ctx, agent_id):
+        if f["lead_id"] in seen:
+            seen[f["lead_id"]]["also_pending"].append(f)
+            continue
+        f["also_pending"] = []
+        seen[f["lead_id"]] = f
+        out.append(f)
+    return out
+
+
+def _pending_rows(ctx: Ctx, agent_id: str) -> list[dict]:
     return rows(
         ctx.conn,
         """SELECT f.*, l.name, l.phone, l.category, l.npc_count, l.last_outcome, l.last_contact_at,
@@ -167,8 +266,9 @@ def check_overdue(ctx: Ctx) -> dict:
     now = ctx.now()
     # housekeeping: a cancelled follow-up (customer deposited, account closed, lead released) can't be missed
     ctx.conn.execute("DELETE FROM alerts WHERE followup_id IN (SELECT id FROM followups WHERE status='cancelled')")
-    warn_cut = iso(now - timedelta(minutes=ctx.rules.get("warning_after_minutes", 15)))
-    esc_cut = iso(now - timedelta(minutes=ctx.rules.get("escalate_after_minutes", 60)))
+    warn_min = ctx.rules.get("warning_after_minutes", 15)
+    esc_min = ctx.rules.get("escalate_after_minutes", 60)
+    warn_cut = iso(now - timedelta(minutes=warn_min))  # wall-clock pre-filter; lateness counts working minutes only
     warned = escalated = 0
 
     for f in rows(
@@ -177,11 +277,14 @@ def check_overdue(ctx: Ctx) -> dict:
            WHERE f.status='pending' AND l.status='open' AND f.due_at <= ? AND (f.warned_at IS NULL OR f.escalated_at IS NULL)""",
         (warn_cut,),
     ):
+        late = ctx.working_minutes(parse_dt(f["due_at"], ctx.tz), now)
+        if late < warn_min:
+            continue  # due after hours / before a weekend: the clock runs from the next working start
         who = f["name"] or f["lead_id"]
         due = parse_dt(f["due_at"], ctx.tz).strftime("%d %b %H:%M")
         kind = KIND_LABELS.get(f["kind"], f["kind"])
         if f["warned_at"] is None:
-            msg = f"{kind} for {who} ({f['phone']}) was due at {due} and is overdue. Call now."
+            msg = f"{kind} for {who}{(' (' + f['phone'] + ')') if f['phone'] else ''} was due at {due} and is overdue. Call now."
             ctx.conn.execute("UPDATE followups SET warned_at=? WHERE id=?", (iso(now), f["id"]))
             ctx.conn.execute(
                 "INSERT INTO alerts (followup_id, lead_id, agent_id, level, message, created_at) VALUES (?,?,?,?,?,?)",
@@ -189,7 +292,7 @@ def check_overdue(ctx: Ctx) -> dict:
             )
             notify(ctx, f["agent_id"], "warning", f"Overdue follow-up: {who}", msg)
             warned += 1
-        if f["escalated_at"] is None and f["due_at"] <= esc_cut:
+        if f["escalated_at"] is None and late >= esc_min:
             agent = (ctx.member(f["agent_id"]) or {}).get("name", f["agent_id"])
             msg = f"{agent} missed the {kind.lower()} for {who} due at {due}."
             ctx.conn.execute("UPDATE followups SET escalated_at=?, missed=1 WHERE id=?", (iso(now), f["id"]))
@@ -211,12 +314,15 @@ def create_system_followups(ctx: Ctx) -> int:
     stale_cut = iso(now - timedelta(days=ctx.rules.get("stale_after_days", 3)))
     created = 0
 
+    soon = iso(now + timedelta(hours=2))
     open_leads = rows(
         ctx.conn,
-        """SELECT * FROM leads l WHERE status='open' AND assigned_to IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM followups f WHERE f.lead_id=l.lead_id AND f.status='pending')""",
+        """SELECT l.*, (SELECT MIN(f.due_at) FROM followups f WHERE f.lead_id=l.lead_id AND f.status='pending') AS next_due
+           FROM leads l WHERE status='open' AND assigned_to IS NOT NULL AND COALESCE(campaign,'') NOT IN ('referral','sarthi')""",
     )
     for lead in open_leads:
+        if lead["next_due"] and lead["next_due"] <= max(soon, iso(due)):
+            continue  # already being called soon
         # newest of last contact / assignment / first seen (any can be missing on imported data)
         since = max(filter(None, [lead["last_contact_at"], lead["assigned_at"], lead["first_seen_at"]]), default="")
         last_sys = one(ctx.conn, "SELECT MAX(created_at) AS t FROM followups WHERE lead_id=? AND kind='system'", (lead["lead_id"],))
@@ -236,7 +342,7 @@ def create_system_followups(ctx: Ctx) -> int:
                     when = parse_dt(ev["event_time"], ctx.tz).strftime("%d %b %H:%M")
                     reason = f"{triggers[signal]} ({when})"
                     break
-        if not reason and lead["last_contact_at"] and lead["last_contact_at"] < stale_cut:
+        if not reason and not lead["next_due"] and lead["last_contact_at"] and lead["last_contact_at"] < stale_cut:
             reason = f"No contact since {parse_dt(lead['last_contact_at'], ctx.tz):%d %b}: re-engage"
         if reason:
             add_followup(ctx, lead["lead_id"], lead["assigned_to"], due, "system", reason)

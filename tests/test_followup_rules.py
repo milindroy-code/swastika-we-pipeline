@@ -105,13 +105,20 @@ def test_07_gm_cannot_pick_their_own_npc_retry_time(ctx):
     assert due(ctx, "C", "npc_retry") == TUE_1100 + timedelta(hours=4)
 
 
-def test_08_six_npcs_in_a_row_mark_the_client_unreachable_and_tell_the_sm(ctx):
+def test_08_six_npcs_pause_for_a_week_then_a_second_round_closes(ctx):
     client(ctx, "C"); assign(ctx)
-    for _ in range(6):
+    log_call(ctx, "C", "gm", "not_picked"); log_call(ctx, "C", "gm", "not_picked")  # a double tap is one attempt
+    assert one(ctx.conn, "SELECT npc_count FROM leads WHERE lead_id='C'")["npc_count"] == 1
+    for i in range(5):
+        ctx._now = TUE_1100 + timedelta(hours=1 + i)                         # each retry an hour or more apart
         log_call(ctx, "C", "gm", "not_picked")
-    assert one(ctx.conn, "SELECT status FROM leads WHERE lead_id='C'")["status"] == "unreachable"
-    assert due(ctx, "C") is None
+    assert one(ctx.conn, "SELECT status FROM leads WHERE lead_id='C'")["status"] == "open"
+    assert due(ctx, "C", "system") == ctx._now + timedelta(days=7)          # one more round after 7 days
     assert one(ctx.conn, "SELECT COUNT(*) n FROM alerts WHERE lead_id='C' AND manager_id='sm'")["n"] == 1
+    for i in range(6):
+        ctx._now = TUE_1100 + timedelta(days=7, hours=i * 1.5)
+        log_call(ctx, "C", "gm", "not_picked")
+    assert one(ctx.conn, "SELECT status FROM leads WHERE lead_id='C'")["status"] == "unreachable" and due(ctx, "C") is None
 
 
 # ---------------------------------------------------------------- spoke to them
@@ -124,15 +131,13 @@ def test_09_promised_callback_is_due_at_the_promised_time(ctx):
     assert due(ctx, "C", "promised") == when
 
 
-def test_10_interested_without_a_time_gets_a_system_follow_up_after_3_quiet_days(ctx):
+def test_10_interested_without_a_time_is_followed_up_next_working_day(ctx):
     client(ctx, "C"); assign(ctx)
     log_call(ctx, "C", "gm", "interested")
-    assert due(ctx, "C") is None
-    ctx._now = TUE_1100 + timedelta(days=3, hours=1)
-    assert create_system_followups(ctx) == 1 and due(ctx, "C", "system") is not None
+    assert due(ctx, "C", "promised") == TUE_1100 + timedelta(hours=24)
 
 
-def test_11_converted_closes_the_client_and_records_the_deposit(ctx):
+def test_11_deposit_at_the_target_closes_the_client_as_funded(ctx):
     client(ctx, "C"); assign(ctx)
     log_call(ctx, "C", "gm", "converted", "added by UPI", deposit_amount=30000)
     assert one(ctx.conn, "SELECT status FROM leads WHERE lead_id='C'")["status"] == "converted"
@@ -141,11 +146,43 @@ def test_11_converted_closes_the_client_and_records_the_deposit(ctx):
     assert (row["converted"], row["funded_target"], row["deposits"]) == (1, 1, 30000)
 
 
-def test_12_not_interested_and_wrong_number_close_without_follow_ups(ctx):
+def test_12_not_interested_gets_one_more_try_and_wrong_number_closes(ctx):
     client(ctx, "A"); client(ctx, "B"); assign(ctx)
     log_call(ctx, "A", "gm", "not_interested"); log_call(ctx, "B", "gm", "wrong_number")
     status = {r["lead_id"]: r["status"] for r in rows(ctx.conn, "SELECT lead_id, status FROM leads")}
-    assert status == {"A": "not_interested", "B": "invalid"} and due(ctx, "A") is None and due(ctx, "B") is None
+    assert status == {"A": "open", "B": "invalid"} and due(ctx, "B") is None
+    assert due(ctx, "A", "system") == TUE_1100 + timedelta(days=7)
+    log_call(ctx, "A", "gm", "not_interested")                              # second time: respect it
+    assert one(ctx.conn, "SELECT status FROM leads WHERE lead_id='A'")["status"] == "not_interested" and due(ctx, "A") is None
+
+
+def test_12b_a_deposit_below_the_target_moves_the_client_to_low_margin_and_keeps_following_up(ctx):
+    client(ctx, "C"); assign(ctx)
+    log_call(ctx, "C", "gm", "converted", "added 8k", deposit_amount=8000)
+    lead = one(ctx.conn, "SELECT status, campaign, extra FROM leads WHERE lead_id='C'")
+    assert (lead["status"], lead["campaign"]) == ("open", "low_margin")
+    assert json.loads(lead["extra"])["current_margin"] == 8000
+    assert due(ctx, "C", "promised") == TUE_1100 + timedelta(hours=24)       # top-up follow-up
+    ctx._now = TUE_1100 + timedelta(days=1)
+    log_call(ctx, "C", "gm", "converted", "topped up", deposit_amount=22000)  # 8k + 22k = target
+    assert one(ctx.conn, "SELECT status FROM leads WHERE lead_id='C'")["status"] == "converted" and due(ctx, "C") is None
+    row = next(r for r in compliance(ctx, ctx.today()) if r["caller_id"] == "gm")
+    assert (row["funded_target"], row["deposits"]) == (1, 22000)
+
+
+def test_12c_new_clients_past_the_registration_window_stop_being_followed_up(ctx):
+    from wepipeline.followups import expire_out_of_window
+    from wepipeline.admin import save_rules, current_sla
+
+    client(ctx, "OLD", extra={"registration_date": (TUE_1100 - timedelta(days=31)).isoformat()}, campaign="new")
+    client(ctx, "FRESH", extra={"registration_date": (TUE_1100 - timedelta(days=10)).isoformat()}, campaign="new")
+    client(ctx, "CHURN", extra={"registration_date": (TUE_1100 - timedelta(days=400)).isoformat()}, campaign="reactivation", tier="hot")
+    assign(ctx)
+    assert expire_out_of_window(ctx) == 1
+    status = {r["lead_id"]: r["status"] for r in rows(ctx.conn, "SELECT lead_id, status FROM leads")}
+    assert status == {"OLD": "out_of_window", "FRESH": "open", "CHURN": "open"} and due(ctx, "OLD") is None
+    save_rules(ctx, {"registration_window_days": 7}, current_sla(ctx))   # admin narrows the window
+    assert expire_out_of_window(ctx) == 1 and one(ctx.conn, "SELECT status FROM leads WHERE lead_id='FRESH'")["status"] == "out_of_window"
 
 
 # ---------------------------------------------------------------- deadlines
@@ -180,7 +217,7 @@ def test_15_calling_early_or_within_15_minutes_is_on_time(ctx):
 
 
 # ---------------------------------------------------------------- the system creates follow-ups too
-def test_16_app_activity_after_the_last_call_creates_a_follow_up(ctx):
+def test_16_app_activity_pulls_the_next_follow_up_forward(ctx):
     client(ctx, "C"); assign(ctx)
     log_call(ctx, "C", "gm", "interested")
     ctx._now = TUE_1100 + timedelta(hours=2)

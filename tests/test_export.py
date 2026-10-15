@@ -166,3 +166,14 @@ def test_logged_call_updates_its_row_immediately(ctx, monkeypatch):
 
 def test_row_update_is_skipped_without_a_sheet(ctx):
     assert sheet_export.update_customer_row(ctx, "BUYER") is None
+
+
+def test_rows_can_be_built_for_chosen_clients_and_skip_drive_pool_clients(ctx):
+    ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, category, source, extra, status) VALUES (?,?,?,?,?,?)",
+                     ("POOL1", "POOL1", "Traded - active (last 30 days)", "referral", "{}", "drive"))
+    ctx.conn.commit()
+    everyone = {r["client"] for r in sheet_export.build_rows(ctx)}
+    assert {"BUYER", "BROWSER", "OLD"} <= everyone and "POOL1" not in everyone
+    chosen = sheet_export.build_rows(ctx, lead_ids=["BROWSER", "BUYER", "POOL1"])
+    assert sorted(r["client"] for r in chosen) == ["BROWSER", "BUYER"]
+    assert sheet_export.build_rows(ctx, lead_ids=[]) == []

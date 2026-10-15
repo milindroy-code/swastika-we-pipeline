@@ -77,7 +77,8 @@ def test_late_npc_rolls_to_next_working_morning(ctx):
 def test_max_npc_marks_unreachable_and_tells_manager(ctx):
     load(ctx, {"Lead ID": "L1", "Phone": "9000000001"})
     agent = one(ctx.conn, "SELECT assigned_to FROM leads")["assigned_to"]
-    for _ in range(ctx.rules["max_npc_attempts"]):
+    for i in range(2 * ctx.rules["max_npc_attempts"]):  # a first round pauses for a week; a second round closes
+        ctx._now = MON_11 + timedelta(hours=2 * i)
         log_call(ctx, "L1", agent, "not_picked")
     assert one(ctx.conn, "SELECT status FROM leads")["status"] == "unreachable"
     assert queue_for(ctx, agent) == []

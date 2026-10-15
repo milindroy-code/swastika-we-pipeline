@@ -103,7 +103,17 @@ def highlight_for(ctx: Ctx, segment: str | None) -> str | None:
 
 
 def target(ctx: Ctx) -> int:
-    return int(ctx.cfg.get("funding_target") or 0)
+    """The funded-account target (OKR). Admin can change it on Admin: rules; config.yaml is the default."""
+    return int(ctx.rules.get("funding_target") or ctx.cfg.get("funding_target") or 0)
+
+
+def window_days(ctx: Ctx) -> int:
+    """Registration window the Growth team works new clients in. Admin-editable."""
+    return int(ctx.rules.get("registration_window_days") or ctx.cfg.get("registration_window_days") or 30)
+
+
+def money(amount: int | float) -> str:
+    return f"₹{amount:,.0f}"
 
 
 def starter_amount(ctx: Ctx, segment: str | None) -> str:

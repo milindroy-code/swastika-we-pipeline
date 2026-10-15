@@ -1,4 +1,32 @@
-# Deploying the Growth follow-up dashboard (free tier)
+# Deploying the Growth follow-up dashboards
+
+## Option A: office network (in use)
+
+Everything runs on one office PC that can reach the back-office SQL Server. Client data never leaves the company.
+
+| Piece | How |
+|---|---|
+| Main (GMs and SMs) | `http://<PC name>:8501` |
+| Referral drives | `http://<PC name>:8503` |
+| Sarthi activation | `http://<PC name>:8504` |
+| Scheduler: sync, heat score, assignment, alerts, morning / EOD notes; hourly client DB pull; referral and Sarthi pool refresh | `python run.py loop` on the same PC, every 5 min (log: `data\logs\scheduler.log`) |
+| Database | `data\growth.db` on the PC (SQLite). Back it up: copy `data\` while the dashboards are stopped |
+
+1. **Once, as administrator** (right-click PowerShell > Run as administrator):
+   `powershell -ExecutionPolicy Bypass -File "<project>\scripts\install_office.ps1"`
+   Opens ports 8501 / 8503 / 8504 to this PC's subnet only, and starts everything at logon. VPN users on another range:
+   add `-RemoteAddress "LocalSubnet,10.8.0.0/16"` (ask IT for the range).
+2. **Start / restart:** `powershell -ExecutionPolicy Bypass -File scripts\start_dashboards.ps1 -Office -Restart`
+   **Stop:** `scripts\stop_dashboards.ps1`
+3. Share the links with the GMs and SMs. There is no login: anyone on the office network who has the link can open
+   them, and admin rules are protected by the `ADMIN_PIN`.
+4. The PC must stay on and awake during working hours (Power settings: never sleep when plugged in). A laptop that
+   leaves the office or sleeps takes the dashboards down; an always-on desktop or server is better. To move: copy the
+   project folder including `data\`, install Python and `pip install -r requirements.txt -r requirements-office.txt`,
+   set the user environment variables (`CLIENT_DB_USER` / `CLIENT_DB_PASSWORD` if a SQL login is used, `ADMIN_PIN`), and
+   run step 1 there.
+
+## Option B: Streamlit Community Cloud (free tier)
 
 | Piece | Runs on | Cost |
 |---|---|---|
@@ -60,6 +88,16 @@ The tables are created automatically the first time the app connects.
 5. **Make it private** (strongly recommended: there is no login, so anyone with the link would otherwise see client codes):
    in the app, open **Share**, set who can view to **Only specific people**, and invite each GM's and SM's work email.
    They sign in with Google, or with a one-time link sent to their email. The free plan allows one private app.
+
+### 3b. The referral dashboard (optional), about 3 min
+
+Create a second app from the same repository with main file `referral_app.py`, and paste the same Secrets
+(`DATABASE_URL`, `ADMIN_PIN`). Both apps read the same Neon database. To show the right link on the main dashboard,
+add `REFERRAL_DASHBOARD_URL = "https://<your-referral-app>.streamlit.app"` to the main app's Secrets.
+
+### 3c. The Sarthi activation dashboard (optional), about 3 min
+
+Same as 3b with main file `sarthi_app.py`. Add `SARTHI_DASHBOARD_URL` to the main app's Secrets for the link.
 
 ## 4. First-time setup in the dashboard, about 5 min
 

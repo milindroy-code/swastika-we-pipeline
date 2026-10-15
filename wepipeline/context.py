@@ -1,6 +1,8 @@
 """Configuration, clock and working-hours helpers shared by every module."""
 from __future__ import annotations
 
+import re
+
 import json
 import os
 import time as _time
@@ -70,7 +72,20 @@ class Ctx:
         return start, end, days
 
     def is_working_day(self, d: date) -> bool:
-        return d.weekday() in self._hours()[2]
+        holidays = {str(h) for h in (self.cfg.get("working_hours", {}).get("holidays") or [])}
+        return d.weekday() in self._hours()[2] and d.isoformat() not in holidays
+
+    def working_minutes(self, a: datetime, b: datetime) -> float:
+        """Minutes of working time between a and b (nights, weekends and holidays don't count)."""
+        a, b = a.astimezone(self.tz), b.astimezone(self.tz)
+        total, d = 0.0, a.date()
+        while d <= b.date():
+            if self.is_working_day(d):
+                lo, hi = max(a, self.day_start(d)), min(b, self.day_end(d))
+                if hi > lo:
+                    total += (hi - lo).total_seconds() / 60
+            d += timedelta(days=1)
+        return total
 
     def day_start(self, d: date) -> datetime:
         return datetime.combine(d, self._hours()[0], self.tz)
@@ -161,3 +176,11 @@ def parse_dt(value, tz: ZoneInfo) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz)
     return dt.astimezone(tz).replace(microsecond=0)
+
+
+def norm_client_id(value) -> str:
+    """One spelling per client code: trimmed, upper-case, and '12345.0' (a number read from Excel) as '12345'."""
+    v = str(value if value is not None else "").strip().upper()
+    if re.fullmatch(r"\d+\.0+", v):
+        v = v.split(".")[0]
+    return "" if v in {"NAN", "NONE", "NAT"} else v

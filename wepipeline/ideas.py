@@ -32,6 +32,78 @@ def build(d: dict) -> list[dict]:
     def add(rank, fact, angle):
         out.append((rank, fact, angle))
 
+    # --- Sarthi activation: Sarthi is off; show it and switch it on together. No funding push on this call
+    if stage == "sarthi_activation":
+        a = d.get("activation") or {}
+        if d.get("sarthi_interest"):
+            add(0, f"{s} off, phir bhi interest: {d['sarthi_interest'].replace(' in 30 days, with Sarthi off', '')}",
+                f"Batao: {s} on hoga toh yahi ideas seedha app pe aayenge, entry-target-stop-loss ke saath. Abhi on kar dete hain?")
+        if a.get("total_trades"):
+            add(1, f"{a['total_trades']} trades, {a.get('active_days', 0)} din active (last {a.get('window_days', 60)} din)",
+                f"Aap already active trader ho; {s} ke ready ideas research ka time bachayenge, faisla aapka hi rahega")
+        if d.get("campaign_engaged"):
+            add(1, f"{s} campaign pe response: {d['campaign_engaged']}", "Usi message se shuru karo: \"Aapne hamara Sarthi message dekha tha\"")
+        if d.get("record_hi"):
+            add(2, d["record_hi"], "Number jaisa hai waisa batao; past results future ki guarantee nahi")
+        if seg:
+            add(3, f"Pasand ka segment: {seg}", f"{seg} ke {s} ideas dikhao")
+        add(4, f"{s} on karna", "App mein 1 minute: call pe hi saath mein on karwao. On karne se koi trade place nahi hota")
+        out.sort(key=lambda x: x[0])
+        return [{"fact": f, "angle": a2} for _, f, a2 in out][:6]
+
+    # --- referral ask: an active trader; thank, then ask. No funding push on this call
+    if stage == "referral":
+        r = d.get("referral") or {}
+        if d.get("campaign_engaged"):
+            add(0, f"Referral campaign pe response: {d['campaign_engaged']}",
+                "Usi message se shuru karo: \"Aapne hamara refer-a-friend message dekha tha, socha khud baat kar loon\"")
+        coh, tg, h = d.get("referral_cohort") or "", set(d.get("referral_tags") or []), d.get("referral_history") or {}
+        if coh == "C1c":
+            add(0, f"Haal hi mein {h.get('referred', 0)} dost refer kiya, abhi trade shuru nahi hua",
+                "Shukriya bolo; poochho dost ko account / funding mein madad chahiye? Phir: \"Koi aur dost?\"")
+        if coh in {"C1a", "C1b"}:
+            add(0, f"Pehle {h.get('referred', 0)} dost refer kiye, {h.get('active', 0)} ne trade kiya",
+                f"Shukriya se shuru karo: \"Aapke refer kiye {h.get('active', 0)} dost ne hamare saath trading shuru ki, thank you\"")
+        if coh == "C1b" or ("dormant" in tg and coh not in {"C2"}):
+            pr = d.get("referral_profile") or {}
+            gap = ""
+            if pr.get("ltd"):
+                from datetime import datetime as _dt
+                try:
+                    days = (_dt.now().date() - _dt.fromisoformat(pr["ltd"][:10]).date()).days
+                    gap = f" ({days // 30} mahine se)" if days >= 60 else f" ({days} din se)"
+                except ValueError:
+                    gap = ""
+            add(0, f"Trade nahi kiya{gap}",
+                "Pehle reconnect: poochho kya badla, kya wapas laa sakta hai (charges, loss, time, app). Referral tabhi poochho jab "
+                "baat achhi chale")
+            if seg:
+                add(1, f"Pasand ka segment: {seg}", f"{seg} ke {s} ideas dikhao: \"Wapas shuru karna ho toh ready ideas milenge\"")
+        elif coh == "C2":
+            add(0, "Naya client (1-6 mahine), trade kar rahe hain",
+                "Onboarding check-in: experience kaisa raha, koi dikkat? Madad ke baad hi referral poochho")
+        elif r.get("total_trades"):
+            add(0, f"{r.get('total_trades', 0)} trades, {r.get('active_days', 0)} din active (last {r.get('window_days', 60)} din)",
+                "Pehle shukriya bolo: aap hamare sabse active clients mein ho. Poochho experience kaisa hai, koi problem toh nahi")
+        elif coh not in {"C1a"}:
+            add(0, "Swastika ke saath hain", "Pehle shukriya bolo; poochho experience kaisa hai, koi problem toh nahi")
+        if "sarthi" in tg:
+            add(1, f"{s} use karte hain", f"Angle: \"Aapke dost ko bhi wahi {s} ideas milenge jo aap dekhte ho\"")
+        if "heavy" in tg and coh != "C4":
+            add(2, "Active trader", "Unke trading circle ke dost sabse sahi: jo already trade karte hain ya seekhna chahte hain")
+        add(1, "Referral ka sahi moment",
+            "Seedha poochho: koi dost / family jo trading karte hain ya shuru karna chahte hain? 1-2 naam aur number, "
+            "unki permission se")
+        add(2, "Dost ko kya milega", "Discount brokerage, " + s + " ke ready trade ideas, aur account kholne mein poori madad"
+            + (f". {d['pricing_hi']}" if d.get("pricing_hi") else ""))
+        if d.get("reward_hi"):
+            add(1, "Dono ko reward", f"Batao: {d['reward_hi']}. Isse zyada kuch promise mat karo")
+        if d.get("sarthi_active") is False:
+            add(4, f"{s} on nahi hai", f"Baat ke end mein {s} on karwa do, ideas seedha app pe aayenge")
+        add(5, "Feedback mile toh", "Note karo aur SM ko batao; problem pehle, referral baad mein")
+        out.sort(key=lambda x: x[0])
+        return [{"fact": f, "angle": a} for _, f, a in out][:6]
+
     # --- payout: retention first, and the payout is never blocked
     if stage == "payout":
         amt = f"₹{d['payout_amount']:,.0f} ka " if d.get("payout_amount") else ""
@@ -47,8 +119,7 @@ def build(d: dict) -> list[dict]:
             f"{s} ke ideas stop-loss ke saath aate hain; chhote amount se try kar sakte hain (returns guaranteed nahi)")
         if d.get("rm_hi"):
             add(5, "Trades manage karna mushkil lag raha ho", f"Offer karo: {d['rm_hi']}")
-        keep = f" (ideally ₹{d['target']:,} tak, jo funded account ka level hai)" if d.get("target") else ""
-        add(6, "Customer ki marzi sabse upar", f"Puchho, agar chaahein toh kuch balance{keep} {s} ke next idea ke liye rakh sakte hain")
+        add(6, "Customer ki marzi sabse upar", f"Puchho, agar chaahein toh kuch balance {s} ke next idea ke liye account mein rakh sakte hain")
 
     # --- what they did in the app
     if d["orders_unfunded"]:
@@ -100,7 +171,7 @@ def build(d: dict) -> list[dict]:
                 f"₹{goal - have:,.0f} aur add karwao, ₹{goal:,} pe account properly funded hoga aur zyada ideas le sakenge")
         else:
             add(0, f"Low margin client: target ₹{goal:,}{unlock}", f"Top-up karwao ₹{goal:,} tak; UPI se 2 minute")
-    if (d["unfunded"] or d.get("funding_push") or stage in {"dormant_trader", "funded_no_trade"}) and stage not in {"payout", "low_margin"}:
+    if (d["unfunded"] or d.get("funding_push") or stage in {"dormant_trader", "funded_no_trade"}) and stage not in {"payout", "low_margin", "kyc_pending"}:
         goal = d.get("target") or 0
         ask = f"₹{goal:,}" if goal else d["starter_hi"]
         m = d.get("margin")
@@ -136,7 +207,7 @@ def build(d: dict) -> list[dict]:
     if d.get("market"):
         funding_call = (d["unfunded"] or d.get("funding_push") or stage in {"dormant_trader", "funded_no_trade", "low_margin"}) and stage != "payout"
         add(3 if funding_call else 6, f"Market: {d['market']}",
-            ("Market ka mood batao (fact, tip nahi) aur kaho isi liye funds ready rakhna achha hai" if funding_call
+            ("Market ka mood sirf context ke liye batao (fact, tip nahi); funds ki baat client ke apne goal se karo" if funding_call
              else "Baat shuru karne ke liye zikr kar sakte ho (tip nahi, sirf fact)"))
     if d.get("reactivation_engaged"):
         add(1, "Re-activation list: app pe phir se active", "Yahi sahi time hai, aaj hi call karo")
@@ -171,9 +242,8 @@ def closing(d: dict, cfg: dict) -> list[str]:
     s, stage = d["sname"], d["stage"]
     goal = d.get("target") or 0
     if stage == "payout":
-        keep = f"₹{goal:,}" if goal else "kuch"
-        return [f"Wajah solve hone ke baad poochho: \"Payout request cancel ya kam karke {keep} {s} ideas ke liye rakhna chahenge? "
-                "Aapki marzi.\"",
+        return [f"Wajah solve hone ke baad poochho: \"Payout normal process hoga. Chaahein toh thoda balance {s} ideas ke liye "
+                "account mein rakh sakte hain. Aapki marzi.\"",
                 "Na bole toh payout normal hone do, aur poochho: \"Agle mahine phir se ek baar baat karein?\" (follow-up set karo)"]
     if stage == "low_margin":
         goal = d.get("target") or 0
@@ -181,10 +251,29 @@ def closing(d: dict, cfg: dict) -> list[str]:
         gap = max(goal - have, 0) if goal else 0
         lines = [f"Seedha poochho: \"₹{gap:,.0f} abhi UPI se add karke ₹{goal:,} kar dete hain?\"" if gap
                  else f"Seedha poochho: \"Top-up karke ₹{goal:,} kar dete hain?\""]
-        if gap > 10000:
+        if gap > int((cfg.get("closing") or {}).get("fallback_amount") or 10000):
             lines.append(f"Agar poora nahi: \"Aaj ₹{gap // 2:,.0f}, baaki kab?\" Woh time follow-up mein set karo")
         lines.append("Haan bole toh wahin UPI karwao aur 💰 Converted pe top-up amount daalo")
         return lines
+    if stage == "sarthi_activation":
+        return [f"Seedha poochho: \"Abhi call pe {s} on kar dete hain? 1 minute lagega, aur aaj ke ideas saath mein dekh lenge.\"",
+                "On ho gaya toh ⚡ Activated pe click karo. Abhi time nahi toh kal ka time le lo (✅ Will do it later)",
+                "Na bole toh wajah note karo; dobara pressure nahi"]
+    if stage == "referral":
+        reward = f" {d['reward_hi'][0].upper()}{d['reward_hi'][1:]}." if d.get("reward_hi") else ""
+        if d.get("referral_cohort") == "C1b":
+            return ["Pehle reconnect: \"Aapne pehle dost refer kiye the, shukriya. Kuch time se trade nahi dikha: sab theek? Kya wapas "
+                    "laa sakta hai?\"",
+                    "Baat achhi chale tabhi: \"Koi aur dost jo trading shuru karna chahte hain? Unki permission se naam aur number.\""
+                    + reward,
+                    "Trade wapas shuru karne mein interest ho toh woh pehle: referral agle call pe (✅ Will share later)"]
+        return [f"Seedha poochho: \"Koi 1-2 dost ya family jo trading karte hain ya shuru karna chahte hain? Unka naam aur number "
+                f"de sakte hain? Hum unse pehle permission lekar hi baat karenge.{reward}\"",
+                "Naam / number mile toh 🤝 Gave referral(s) pe likho. Abhi yaad nahi toh kal ka time le lo (✅ Interested)",
+                "Na bole toh shukriya bolo; dobara pressure nahi"]
+    if stage == "kyc_pending":
+        return ["Seedha poochho: \"KYC abhi call pe saath mein poora kar lete hain? 5 minute lagenge.\"",
+                "KYC ho jaaye toh agla call funding ke liye set karo (🔁 Wants a call back)"]
     if not (d["unfunded"] or d.get("funding_push") or stage in {"dormant_trader", "funded_no_trade"}):
         return [f"Seedha poochho: \"Aaj {s} ka ek idea saath mein dekh lein?\""]
     ask = f"₹{goal:,}" if goal else d["starter_hi"]
@@ -199,8 +288,17 @@ def closing(d: dict, cfg: dict) -> list[str]:
     return lines
 
 
-def objections(stage: str, s: str, pricing_hi: str, rm_hi: str) -> list[str]:
+def objections(stage: str, s: str, pricing_hi: str, rm_hi: str, target: int = 0, reward_hi: str = "") -> list[str]:
     """Short Hinglish answers to the objections most likely on this call."""
+    if stage == "sarthi_activation":
+        return [f"\"Main khud trade karta hoon\" → Bilkul; {s} sirf ideas bhejta hai, trade aap hi chunoge. On karne se koi trade nahi hota",
+                f"\"Kitna profit hoga?\" → Track record jaisa hai waisa batao; returns guaranteed nahi, har idea mein stop-loss hai",
+                "\"Charges?\" → Sirf official charges batao, apni taraf se kuch promise mat karo" + (f"; {pricing_hi}" if pricing_hi else "")]
+    if stage == "referral":
+        return ["\"Kisi ko nahi jaanta\" → Koi baat nahi; kabhi koi trading ke baare mein pooche toh app link share kar dena",
+                "\"Dost ka number dena theek nahi lagta\" → Bilkul; aap unse pooch lo, ya unhe hamara number de do",
+                "\"Mujhe kya milega?\" → " + (f"{reward_hi[0].upper()}{reward_hi[1:]}; isse zyada kuch promise mat karo" if reward_hi
+                                                  else "Sirf official referral programme ki baat karo; apni taraf se kuch promise mat karo")]
     if stage == "payout":
         lines = ["\"Paise ki zaroorat hai\" → Bilkul, payout normal process hoga. Chaahein toh thoda balance "
                  f"{s} ideas ke liye rakh sakte hain"]
@@ -213,7 +311,8 @@ def objections(stage: str, s: str, pricing_hi: str, rm_hi: str) -> list[str]:
         lines.append(f"\"Kya trade karun, pata nahi\" → Isi ke liye {s} hai: stop-loss ke saath ready ideas; "
                      "chhote amount se shuru karo, returns guaranteed nahi")
     if stage == "low_margin":
-        lines.append("\"Pehle se paise daale hain\" → Haan, account live hai; ₹30k tak top-up se ek saath zyada Sarthi ideas le sakenge")
+        goal_txt = f"₹{target:,}" if target else "target"
+        lines.append(f"\"Pehle se paise daale hain\" → Haan, account live hai; {goal_txt} tak top-up se ek saath zyada {s} ideas le sakenge")
     if pricing_hi and stage != "active_trader":
         lines.append(f"\"Charges zyada hain\" / \"Zerodha ya Groww use karta hoon\" → {pricing_hi}")
     if rm_hi and stage in {"dormant_trader", "funded_no_trade", "active_trader"}:

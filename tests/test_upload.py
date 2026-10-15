@@ -7,7 +7,7 @@ import pytest
 from tests.helpers import open_test_ctx
 from wepipeline.context import load_config
 from wepipeline.db import one, rows
-from wepipeline.upload import analyse_upload, batch_rows, batch_workbook, list_uploads
+from wepipeline.upload import analyse_upload, assign_upload, batch_rows, batch_workbook, held_count, list_uploads
 
 TZ = ZoneInfo("Asia/Kolkata")
 NOW = datetime(2026, 10, 8, 11, 0, tzinfo=TZ)  # Thursday
@@ -46,10 +46,18 @@ def test_uploaded_pivot_is_scored_ranked_assigned_and_pitched(ctx, tmp_path):
     assert (s["clients"], s["new_leads"], s["already_known"]) == (3, 2, 1)  # "Others" ignored
     assert one(ctx.conn, "SELECT category FROM leads WHERE lead_id='HOTC'")["category"] == "Not yet matched in client DB"
     assert s["ageing"]["status"] == "skipped"
-    assert s["assigned"] == 3 and s["waiting"] == 0
+    assert s["assigned"] == 0 and s["on_hold"] == 3 and s["waiting"] == 0  # nobody goes to a GM until the SM presses Assign
     assert one(ctx.conn, "SELECT COUNT(*) n FROM leads WHERE lead_id='Others'")["n"] == 0
+    up = list_uploads(ctx)[0]
+    assert batch_rows(ctx, up["client_ids"])[0]["gm"] == "Waiting for Assign (SM)"
+    from wepipeline import jobs
+    assert jobs.sync(ctx)["assignment"]["assigned"] == 0  # the hourly sync leaves a held list alone
+    assert held_count(ctx, up["client_ids"]) == 3
 
-    data = batch_rows(ctx, list_uploads(ctx)[0]["client_ids"])
+    res = assign_upload(ctx, up, assigned_by="sm_01")
+    assert (res["released"], res["assigned"]) == (3, 3) and held_count(ctx, up["client_ids"]) == 0
+    assert list_uploads(ctx)[0]["summary"]["assigned_by"] == "sm_01"
+    data = batch_rows(ctx, up["client_ids"])
     assert [r["client"] for r in data][0] == "HOTC" and data[0]["batch_rank"] == 1
     assert data[0]["priority"] == "🔥 Hot" and data[0]["gm"].startswith("GM")
     assert data[0]["opener"].startswith("I noticed you tried to place an order")
@@ -77,9 +85,14 @@ def test_analysed_workbook_has_list_and_summary(ctx, tmp_path):
     pd.DataFrame({"ClientCode": ["A1", "A2"]}).to_csv(path, index=False)
     analyse_upload(ctx, path, uploaded_by="sm_01")
     wb = batch_workbook(ctx, list_uploads(ctx)[0])
-    assert wb.sheetnames == ["Summary", "Analysed list"]
+    assert wb.sheetnames == ["Summary", "Analysed list", "Activity timeline", "Details"]
     ws = wb["Analysed list"]
-    assert ws["A1"].value == "Rank in this list" and ws.max_row == 3
+    assert [c.value for c in ws[1]] == ["Rank", "Priority", "Client", "Client profile", "App activity", "Engagement levers",
+                                        "Insight", "Call script", "Ask (call to action)", "Agar customer bole",
+                                        "When to call", "GM", "Status"]
+    assert ws.max_row == 3 and wb["Details"]["A1"].value == "Rank in this list"
+    row = {c.value: v.value for c, v in zip(ws[1], ws[2])}
+    assert row["GM"] is None and row["Status"] == "open: waiting for Assign (SM)"  # GM stays empty until assigned
     assert wb["Summary"]["B5"].value.startswith("=COUNTIFS(")
 
 
@@ -97,13 +110,15 @@ def test_reactivation_list_only_engaged_customers_go_to_gms(ctx, tmp_path):
         pivot("DASHBOARD_OPENED_MOB", {"QUIET": {"7 Oct, 6PM": 1}, "KNOWN": {"7 Oct, 6PM": 1}}).to_excel(
             xl, sheet_name="DASHBOARD_OPENED_MOB", index=False)
     s = analyse_upload(ctx, path, uploaded_by="sm_01", list_type="reactivation")
+    assert one(ctx.conn, "SELECT assigned_to FROM leads WHERE lead_id='KNOWN'")["assigned_to"] is None  # released before Assign
+    res = assign_upload(ctx, list_uploads(ctx)[0])
     tags = {r["lead_id"]: (r["campaign"], r["assigned_to"], r["heat_tier"])
             for r in rows(ctx.conn, "SELECT lead_id, campaign, assigned_to, heat_tier FROM leads")}
     assert {k: v[0] for k, v in tags.items()} == {"ENGAGED": "reactivation", "QUIET": "reactivation", "KNOWN": "reactivation"}
     assert tags["ENGAGED"][1] is not None and tags["ENGAGED"][2] in ("hot", "warm")   # engaged: straight to a GM
     assert tags["QUIET"][1] is None                                                    # not engaged: watching
     assert tags["KNOWN"][1] is None             # cold and never worked by its GM: released back to watching
-    assert (s["watching"], s["waiting"], s["released_to_watching"]) == (2, 0, 1)
+    assert (res["watching_reactivation"], res["unassigned"], s["released_to_watching"]) == (2, 0, 1)
     rows_ = {r["client"]: r for r in build_rows(ctx)}
     assert rows_["QUIET"]["gm"] == "Waiting for engagement (re-activation)" and rows_["QUIET"]["list"] == "Churned, active again"
     assert "Re-activation list: engaged in the app again" in rows_["ENGAGED"]["levers"]
@@ -143,7 +158,7 @@ def test_reactivation_upload_releases_unworked_cold_customers_only(ctx, tmp_path
     s = analyse_upload(ctx, path, list_type="reactivation")
     owner = {r["lead_id"]: r["assigned_to"] for r in rows(ctx.conn, "SELECT lead_id, assigned_to FROM leads")}
     assert owner == {"COLD_UNWORKED": None, "COLD_CALLED": "gm_03", "COLD_PROMISED": "gm_03"}
-    assert s["released_to_watching"] == 1 and s["watching"] == 1
+    assert s["released_to_watching"] == 1 and s["on_hold"] == 1
     assert one(ctx.conn, "SELECT COUNT(*) n FROM followups WHERE lead_id='COLD_UNWORKED' AND status='pending'")["n"] == 0
 
 
@@ -157,7 +172,8 @@ def test_payout_list_is_urgent_retention_with_amounts(ctx, tmp_path):
     ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, status, category, source, extra, heat_tier, heat_score) VALUES "
                      "('HOTX','HOTX','open','x','WebEngage activity (t)','{}','hot',95)")
     s = analyse_upload(ctx, path, uploaded_by="sm_01", list_type="payout")
-    assert (s["clients"], s["assigned"], s["watching"]) == (2, 2, 0)
+    assert (s["clients"], s["assigned"], s["on_hold"]) == (2, 0, 2)
+    assert assign_upload(ctx, list_uploads(ctx)[0])["assigned"] == 2
     lead = one(ctx.conn, "SELECT * FROM leads WHERE lead_id='PAY1'")
     assert lead["campaign"] == "payout"
     fu = one(ctx.conn, "SELECT due_at, reason FROM followups WHERE lead_id='PAY1'")

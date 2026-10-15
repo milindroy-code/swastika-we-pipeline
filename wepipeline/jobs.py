@@ -7,11 +7,12 @@ import time as _time
 from datetime import date
 
 from .assign import assign_new_leads, rebalance
+from .clientdb import fill_missing_campaigns
 from .context import Ctx, iso
 from .db import one
-from .followups import check_overdue, create_system_followups, reroll_outside_hours
+from .followups import check_overdue, create_system_followups, expire_out_of_window, reroll_outside_hours
 from .heat import refresh_heat
-from .ingest import purge_ignored, sync_leads, sync_webengage
+from .ingest import merge_event_aliases, purge_ignored, sync_leads, sync_webengage
 from .notify import notify
 from .reports import current_block, eod_report, morning_note, routine_nudge
 
@@ -21,6 +22,9 @@ log = logging.getLogger(__name__)
 def sync(ctx: Ctx) -> dict:
     """One full pass: sheet + WebEngage -> heat scores -> assignment -> system follow-ups -> overdue checks."""
     result = {}
+    from .drives import migrate_legacy
+
+    migrate_legacy(ctx)  # one-off: referral / Sarthi pools kept on the client row move to drive memberships
     try:
         result["leads"] = sync_leads(ctx)
     except Exception as e:  # a sheet outage must not stop follow-up checks
@@ -32,6 +36,9 @@ def sync(ctx: Ctx) -> dict:
         log.exception("WebEngage sync failed")
         result["webengage"] = {"error": str(e)}
     result["purged_placeholders"] = purge_ignored(ctx)
+    result["event_aliases_merged"] = merge_event_aliases(ctx)
+    result["lists_filled"] = fill_missing_campaigns(ctx)
+    result["out_of_window"] = expire_out_of_window(ctx)  # before assignment, so no GM capacity goes to them
     result["heat"] = refresh_heat(ctx)
     result["rebalanced"] = rebalance(ctx)
     result["assignment"] = assign_new_leads(ctx)
@@ -110,6 +117,22 @@ def tick(ctx: Ctx) -> dict:
         except Exception as e:  # server unreachable must not stop follow-up checks
             log.exception("Client DB pull failed")
             result["client_db"] = {"error": str(e)}
+    # ...and the referral pool (most active traders + past referrers) whenever it's older than referral.refresh_hours
+    if os.environ.get("CLIENT_DB_PULL") == "1" and ctx.is_working_day(today):
+        from .referral import refresh as refresh_referrals
+
+        try:
+            result["referrals"] = refresh_referrals(ctx)["status"]
+        except Exception as e:
+            log.exception("Referral refresh failed")
+            result["referrals"] = {"error": str(e)}
+        from .activation import refresh as refresh_sarthi_pool
+
+        try:
+            result["sarthi_pool"] = refresh_sarthi_pool(ctx)["status"]
+        except Exception as e:
+            log.exception("Sarthi activation refresh failed")
+            result["sarthi_pool"] = {"error": str(e)}
     result["sync"] = sync(ctx)
     from .market import due_for_refresh, refresh as refresh_market
 

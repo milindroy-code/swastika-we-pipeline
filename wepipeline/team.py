@@ -79,11 +79,11 @@ def save_team(ctx: Ctx, members: list[dict]) -> dict:
     active = {m["id"] for m in clean if m["role"] == "gm" and m["active"]}
     load = open_load(ctx)
     moved, released = 0, 0
-    for lead in rows(ctx.conn, "SELECT lead_id, assigned_to, category, heat_score FROM leads WHERE status='open' "
+    for lead in rows(ctx.conn, "SELECT lead_id, assigned_to, category, heat_score, campaign FROM leads WHERE status='open' "
                                "AND assigned_to IS NOT NULL ORDER BY heat_score DESC"):
         if lead["assigned_to"] in active:
             continue
-        new = pick_caller(ctx, lead["category"], load)
+        new = pick_caller(ctx, lead["category"], load, payout=lead["campaign"] == "payout")
         if new:
             reassign_lead(ctx, lead["lead_id"], new)
             load[new] = load.get(new, 0) + 1

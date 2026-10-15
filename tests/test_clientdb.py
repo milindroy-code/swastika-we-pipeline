@@ -131,6 +131,10 @@ def test_every_lead_gets_an_ageing_category(ctx):
                     "ACTIVE": "Traded - active (last 30 days)", "GHOST": "Not found in client DB"}
     assert res["closed_accounts"] == 1
     assert one(ctx.conn, "SELECT status FROM leads WHERE lead_id='CLOSED'")["status"] == "invalid"
+    # clients that arrived without a list type get one from their DB category
+    lists = {r["lead_id"]: r["campaign"] for r in rows(ctx.conn, "SELECT lead_id, campaign FROM leads WHERE status='open'")}
+    assert lists == {"NEWBIE": "new", "OLDNODEP": "new", "FUNDED": "low_margin", "DORMANT": "reactivation",
+                     "ACTIVE": "low_margin", "GHOST": "new"}
 
     from wepipeline.insights import customer_insight
     dormant = one(ctx.conn, "SELECT * FROM leads WHERE lead_id='DORMANT'")
@@ -159,3 +163,75 @@ def test_placeholder_rows_are_ignored(ctx, tmp_path):
     assert purge_ignored(ctx) == 1
     assert one(ctx.conn, "SELECT COUNT(*) n FROM leads")["n"] == 0
     assert one(ctx.conn, "SELECT COUNT(*) n FROM activity_summary")["n"] == 0
+
+
+def test_referral_and_sarthi_pool_clients_are_never_looked_up_or_aged_as_funding_leads(ctx, monkeypatch):
+    from wepipeline import clientdb
+
+    ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, category, source, extra, status) VALUES (?,?,?,?,?,?)",
+                     ("POOL1", "POOL1", "Not yet matched in client DB", "referral", "{}", "drive"))
+    ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, category, source, extra) VALUES (?,?,?,?,?)",
+                     ("FUNDME", "FUNDME", "Authenticated - no funds added", "WebEngage activity (x.xlsx)", "{}"))
+    asked = []
+    monkeypatch.setattr(clientdb, "lookup_clients", lambda _ctx, ids: asked.extend(ids) or pd.DataFrame())
+    clientdb.enrich_leads(ctx)
+    assert asked == ["FUNDME"]
+    assert one(ctx.conn, "SELECT category FROM leads WHERE lead_id='POOL1'")["category"] == "Not yet matched in client DB"
+
+
+def test_each_list_type_has_its_query_with_the_window_target_and_churn_days_filled_in(ctx):
+    from wepipeline.clientdb import list_query
+
+    ctx.cfg["reactivation"] = {**(ctx.cfg.get("reactivation") or {}), "churn_min_days": 90, "churn_max_days": 365}
+    ctx.cfg["sources"]["client_db"]["payout_query"] = ""
+    low, churn = list_query(ctx, "low_margin"), list_query(ctx, "reactivation")
+    assert "FirstDeposit < 30000" in low and "{" not in low
+    assert "DATEADD(DAY, -90," in churn and "DATEADD(DAY, -365," in churn and "IsAccountClosed" in churn
+    assert "{window_days}" not in list_query(ctx, "no_deposit")
+    payout = list_query(ctx, "payout")
+    assert "FA_TRANSACTIONS" in payout and "0.25 * R.BalanceBefore" in payout and "DATEADD(DAY, -7," in payout and "{" not in payout
+
+
+def test_a_pulled_list_is_one_row_per_client_with_the_client_id_first(ctx, monkeypatch):
+    from wepipeline import clientdb
+
+    monkeypatch.setattr(clientdb, "_query", lambda _ctx, sql: pd.DataFrame(
+        {"FirstDeposit": [5000, 5000, 9000, 1], "client_id": [" ab123 ", "AB123", "CD456", None]}))
+    df = clientdb.pull_list(ctx, "low_margin")
+    assert list(df.columns) == ["CLIENT_ID", "FirstDeposit"] and df["CLIENT_ID"].tolist() == ["AB123", "CD456"]
+    with pytest.raises(ValueError):
+        clientdb.pull_list(ctx, "not_a_list")
+
+
+def test_list_queries_are_wrapped_with_a_centralised_flag_and_lose_their_trailing_order_by(ctx):
+    from wepipeline.clientdb import centralised_sql, with_centralised_flag
+
+    sql = with_centralised_flag(ctx, "SELECT C.CLIENT_ID FROM T C WHERE x IN (SELECT 1)\nORDER BY C.CLIENT_ID;")
+    assert "ORDER BY" not in sql and sql.endswith(") L") and "AS IsCentralized" in sql
+    rule = centralised_sql(ctx)
+    assert rule.startswith("CASE WHEN ISNULL(CAST(C.IsDirect AS INT), 0) = 1 AND (C.Sub_Branch_Code IN ('BPL', 'SHRSHP'")
+    assert "C.Sub_Branch_Code LIKE 'DT%'" in rule and "'GOVPD'" in rule
+
+
+def test_client_ids_are_read_from_a_named_column_or_the_first_one_deduplicated():
+    from wepipeline.clientdb import read_client_ids
+
+    assert read_client_ids(pd.DataFrame({"Name": ["A", "B", "C"], "Client Code": [" ab1", "AB1", "cd2"]})) == ["AB1", "CD2"]
+    assert read_client_ids(pd.DataFrame({"whatever": ["xy9", None, "XY9", "zz1"]})) == ["XY9", "ZZ1"]
+
+
+def test_an_uploaded_app_history_score_is_blended_into_heat(ctx):
+    from wepipeline import prior_score
+
+    for cid in ("STRONG", "QUIET", "NOSCORE"):
+        ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, category, source, extra) VALUES (?,?,?,?,?)",
+                         (cid, cid, "New - no deposit (0-7 days)", "upload", "{}"))
+    ctx.conn.commit()
+    res = prior_score.load(ctx, pd.DataFrame({"Client Code": ["strong", "QUIET", "ELSEWHERE", None], "Score": [0.9, 0.3, 0.5, 0.7]}), "hist.csv")
+    assert (res["saved"], res["skipped"], res["open_clients_matched"], res["score_column"]) == (3, 1, 2, "Score")
+    heat = {r["lead_id"]: r for r in rows(ctx.conn, "SELECT lead_id, heat_score, heat_tier, heat_reasons FROM leads")}
+    assert heat["STRONG"]["heat_score"] == 90 and heat["STRONG"]["heat_tier"] == "hot"  # 0.9 on a 0-1 scale = 90; no live app activity
+    assert heat["QUIET"]["heat_score"] == 30 and "app-history score 30" in heat["QUIET"]["heat_reasons"]
+    assert heat["NOSCORE"]["heat_score"] == 0
+    assert prior_score.blend(ctx, 60, 80) == 95.0 and prior_score.blend(ctx, 60, None) == 60
+    assert prior_score._to_points(pd.Series(["High", "low", "Medium"])).tolist() == [85, 20, 55]

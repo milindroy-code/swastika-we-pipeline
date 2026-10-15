@@ -6,6 +6,7 @@ so it can be recomputed for every customer on every scheduled run.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from datetime import datetime, timedelta
 
@@ -14,6 +15,7 @@ from .clientdb import REGISTERED
 from .context import Ctx, iso, parse_dt
 from .db import rows
 from .heat import TIER_BADGE, contributions, score
+from . import call_script
 from . import ideas as ideas_mod
 from . import sarthi
 from .pitch import PLAYBOOKS, market_notes, segment_label
@@ -34,7 +36,9 @@ OBJECTIONS = {
     "dormant_trader": "\"Charges / app issues\": ask what stopped them, note it for the SM, and show what has changed.",
     "active_trader": "\"I'm fine for now\": ask for feedback and mention segments they haven't activated, with risk disclosures.",
     "payout": "\"I need the money\": respect it; the payout is processed as normal. Ask if a small balance can stay for Sarthi's next idea.",
-    "low_margin": "\"I've already deposited\": yes, and the account is live; topping up to ₹30,000 lets them take more Sarthi ideas at once.",
+    "sarthi_activation": "\"I trade on my own\": that's fine; Sarthi only sends ideas, they decide, and switching it on doesn't place any trade.",
+    "referral": "\"I don't know anyone\": no problem; ask them to keep us in mind and share the app link if someone asks about trading.",
+    "low_margin": "\"I've already deposited\": yes, and the account is live; topping up to the funded-account target lets them take more Sarthi ideas at once.",
 }
 
 
@@ -95,6 +99,41 @@ def registration(ctx: Ctx, lead: dict) -> datetime | None:
     return parse_dt(extra.get("registration_date"), ctx.tz)
 
 
+def referral_reward(ctx: Ctx) -> str:
+    from .referral import settings as referral_settings
+
+    return referral_settings(ctx)["reward_hi"]
+
+
+def _engaged(ctx: Ctx, lead: dict) -> str:
+    from .drives import engagement
+
+    value, why = engagement(ctx, lead.get("campaign") or "referral", lead["lead_id"])
+    return why.replace("campaigns (", "", 1).replace("):", ":", 1) if value > 0 else ""
+
+
+def _referral_context(ctx: Ctx, lead: dict, stage: str) -> dict:
+    """Cohort, tags and past referrals for a referral call (the cohort decides the opening; tags only personalise)."""
+    if stage != "referral":
+        return {}
+    from .referral import cohort, tags
+
+    x = json.loads(lead.get("extra") or "{}")
+    return {"referral_cohort": lead.get("segment") or cohort(ctx, lead), "referral_tags": tags(ctx, lead),
+            "referral_history": x.get("referral_history") or {}, "referral_profile": x.get("referral_profile") or {}}
+
+
+def _sarthi_interest(ctx: Ctx, lead: dict) -> str:
+    from .activation import interest
+
+    return interest(ctx, lead["lead_id"])[1]
+
+
+def _event_code(label: str) -> bool:
+    """'RECOMMENDATION_INTERNAL_SCREEN', 'DASHBOARD_OPENED_MOB': pivot sub-sheets named after app events, not segments."""
+    return "_" in label and re.fullmatch(r"[A-Z0-9_]+", label) is not None
+
+
 def customer_insight(ctx: Ctx, lead: dict) -> dict:
     now = ctx.now()
     ids = lead_user_ids(ctx, lead)
@@ -129,8 +168,10 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     ltd_days = extra.get("days_since_last_trade")
     holdings = extra.get("holdings")
     first_dep = extra.get("first_deposit")
-    segments = list(dict.fromkeys(l for l in (segment_label(s) for s in summary["segments"]) if l and l != "Research home"))
-    preferred = sarthi.segment_from_preference(extra.get("preferred_segment"))
+    segments = list(dict.fromkeys(l for l in (segment_label(s) for s in summary["segments"])
+                                  if l and l != "Research home" and not _event_code(l)))
+    preferred = sarthi.segment_from_preference(extra.get("preferred_segment") or (extra.get("referral_profile") or {}).get("preferred_segment")
+                                               or (extra.get("sarthi") or {}).get("segment"))
     if preferred and preferred not in segments:
         segments.append(preferred)
     seg = segments[0] if segments else None
@@ -150,10 +191,23 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     unfunded = stage in {"kyc_pending", "kyc_no_deposit"} and "deposit_success" not in sig
     if "trade_placed" in sig and unfunded:
         levers.append(f"Funding blocker: tried to place {sig['trade_placed']['count']} order(s) with no funds in the account")
+    ref = extra.get("referral") or {}
+    act = extra.get("sarthi") or {}
+    if stage == "sarthi_activation":
+        from .activation import interest
+
+        keen = interest(ctx, lead["lead_id"])[1]
+        levers.insert(0, f"{sname} is off" + (f": {keen}" if keen else ""))
+        if act.get("total_trades"):
+            levers.append(f"Active trader: {act['total_trades']} trades on {act.get('active_days', 0)} days (last "
+                          f"{act.get('window_days', 60)} days); {sname} ideas fit how they already trade")
+    if stage == "referral":
+        levers.insert(0, f"Top trader: {ref.get('total_trades', 0)} trades on {ref.get('active_days', 0)} trading days "
+                         f"in the last {ref.get('window_days', 60)} days ({ref.get('bucket', 'high')} activity)")
     if stage == "payout":
         when = parse_dt(extra.get("payout_date"), ctx.tz)
         levers.insert(0, f"Payout requested{(' of ' + payout_txt.strip()) if payout_txt else ''}"
-                         f"{(' on ' + when.strftime('%d %b')) if when else ''}: call before the funds leave")
+                         f"{(' on ' + when.strftime('%d %b')) if when else ''}: check in early (the payout proceeds as normal)")
     if lead.get("campaign") == "reactivation" and lead.get("heat_tier") in {"hot", "warm"}:
         levers.append("Re-activation list: engaged in the app again, so this is the moment to call")
     if sarthi_calls:
@@ -197,7 +251,14 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     # ---- conversation opener: Sarthi is the hero feature; the goal is funds in the account (margin)
     play = PLAYBOOKS[stage]
     seg_ideas = f"{seg} trade ideas" if seg else "trade ideas in equity, F&O and commodities"
-    if stage == "payout":
+    if stage == "sarthi_activation":
+        opener = (f"I noticed {sname} isn't switched on for your account yet. It sends ready {seg_ideas} with entry, target and "
+                  "stop-loss straight to the app, and you decide which to take. Can I switch it on with you now? It takes a minute.")
+    elif stage == "referral":
+        opener = (f"Thank you for trading so actively with us: {ref.get('total_trades', 0)} trades in the last "
+                  f"{ref.get('window_days', 60)} days. How has your experience been? I also wanted to ask: is there a friend or "
+                  "family member who trades, or wants to start, who might like what you get here?")
+    elif stage == "payout":
         opener = (f"I'm calling about the {payout_txt}withdrawal you requested. It's being processed as normal; I just wanted "
                   "to check everything is okay with your account, and whether there's anything we could do better?")
     elif stage == "dormant_trader":
@@ -233,6 +294,23 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
     # ---- pitch ideas: Sarthi story, its complete track record, activation, then margin
     ideas = []
     record = sarthi.track_line(ctx, seg)
+    if stage == "sarthi_activation":
+        ideas.append(f"Show one {sname} idea (entry, target, stop-loss) and switch it on together in the app on the call")
+        ideas.append(f"{record}. Say it as it is: past results don't guarantee future ones" if record else
+                     f"{sname} gives ready ideas; the client chooses what to take. No promises on returns")
+        ideas.append("Switching it on doesn't place any trade; it only sends ideas. On charges, quote only the official terms")
+    if stage == "referral":
+        ideas.append("Thank them and ask for feedback first; if something bothers them, note it for the SM before asking")
+        ideas.append("Ask for 1-2 friends or family who trade or want to start; take a number only with the friend's consent")
+        ideas.append("What the friend gets: " + (pricing or "discount brokerage") + f", {sname} trade ideas, and help setting up")
+        from .referral import settings as referral_settings
+
+        r = referral_settings(ctx)
+        if r["reward_referrer"] or r["reward_friend"]:
+            ideas.append(f"Referral reward: ₹{r['reward_referrer']:,} to them and ₹{r['reward_friend']:,} to the friend, once the "
+                         "friend makes their first trade on the app (programme T&C apply). Promise nothing beyond it")
+        else:
+            ideas.append("Referral reward: only mention the official programme; don't quote or promise an amount")
     if stage == "payout":
         ideas.append("Never delay or discourage the withdrawal: confirm it's being processed, then ask why they're withdrawing")
         if pricing:
@@ -306,6 +384,9 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
         "current_margin": extra.get("current_margin") or (first_dep if stage == "low_margin" else None),
         "reactivation_engaged": lead.get("campaign") == "reactivation" and lead.get("heat_tier") in {"hot", "warm"},
         "funding_push": lead.get("campaign") == "reactivation",  # churned list: deposit + trades, whatever the trade history
+        "referral": ref, "reward_hi": referral_reward(ctx), **_referral_context(ctx, lead, stage),
+        "campaign_engaged": _engaged(ctx, lead) if stage in {"referral", "sarthi_activation"} else "",
+        "activation": act, "sarthi_interest": _sarthi_interest(ctx, lead) if stage == "sarthi_activation" else "",
     })
 
     best = f" around {best_time}" if best_time else ""
@@ -315,12 +396,25 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
               "dormant_trader": f"Funds topped up to {sarthi.starter_amount(ctx, seg)} + first trade back with a {sname} idea",
               "active_trader": f"{sname} in a new segment + more margin",
               "payout": "Find and fix the reason; they stay invested and trade more (cancelling the payout is their choice)",
-              "low_margin": f"Top-up to {sarthi.starter_amount(ctx, seg)} on the call + first trade with a {sname} idea"}[stage]
+              "low_margin": f"Top-up to {sarthi.starter_amount(ctx, seg)} on the call + first trade with a {sname} idea",
+              "referral": "Thank them, then 1-2 referrals (friend's name + number, with consent)",
+              "sarthi_activation": f"{sname} switched on during the call"}[stage]
     if sarthi_active is not True and needs_sarthi and not action.startswith(sname) and stage != "payout":
         action = f"{sname} activated + " + action[0].lower() + action[1:]
-    next_action = f"{action}; call{best}" if lead.get("heat_tier") != "cold" or best else action
+    next_action = f"{action}; call{best}" if best else action
+
+    script = call_script.build({
+        "sname": sname, "stage": stage, "seg": seg, "target": sarthi.target(ctx), "sarthi_calls": sarthi_calls,
+        "research_views": sig.get("research_viewed", {}).get("count", 0), "last24": last24, "best_time": best_time,
+        "orders_unfunded": sig.get("trade_placed", {}).get("count", 0) if unfunded else 0, "ltd_days": ltd_days,
+        "sarthi_active": sarthi_active if needs_sarthi else True, "reward_hi": referral_reward(ctx),
+        "current_margin": extra.get("current_margin") or (first_dep if stage == "low_margin" else None),
+        "reg_days": reg_days, "deposit_failed": "deposit_failed" in sig, "payout_amount": payout_amt,
+        "holdings": holdings, "high_value": high_value,
+    })
 
     return {
+        **script,
         "deposit_status": extra.get("deposit_status", ""),
         "first_deposit_date": (parse_dt(extra.get("first_deposit_date"), ctx.tz) or now).strftime("%d %b %Y") if extra.get("first_deposit_date") else "",
         "last_trade_date": (parse_dt(extra.get("last_trade_date"), ctx.tz) or now).strftime("%d %b %Y") if extra.get("last_trade_date") else "",
@@ -350,15 +444,17 @@ def customer_insight(ctx: Ctx, lead: dict) -> dict:
                                       "starter_hi": sarthi.starter_amount(ctx, seg),
                                       "current_margin": extra.get("current_margin") or (first_dep if stage == "low_margin" else None),
                                       "sarthi_active": sarthi_active if needs_sarthi else True,
-                                      "funding_push": lead.get("campaign") == "reactivation"}, ctx.cfg),
+                                      "funding_push": lead.get("campaign") == "reactivation", "reward_hi": referral_reward(ctx),
+                                      **_referral_context(ctx, lead, stage)}, ctx.cfg),
         "call_ideas_text": "\n".join(f"• {i['fact']} → {i['angle']}" for i in call_ideas),
         "closing_text": "\n".join(f"• {c}" for c in ideas_mod.closing({"sname": sname, "stage": stage, "target": sarthi.target(ctx),
                                                                     "unfunded": unfunded, "starter_hi": sarthi.starter_amount(ctx, seg),
                                                                     "current_margin": extra.get("current_margin") or (first_dep if stage == "low_margin" else None),
                                                                     "sarthi_active": sarthi_active if needs_sarthi else True,
-                                      "funding_push": lead.get("campaign") == "reactivation"}, ctx.cfg)),
+                                      "funding_push": lead.get("campaign") == "reactivation", "reward_hi": referral_reward(ctx),
+                                      **_referral_context(ctx, lead, stage)}, ctx.cfg)),
         "objections_hi": " · ".join(ideas_mod.objections(stage, sname, offers_hi.get("pricing_line_hi", ""),
-                                                         offers_hi.get("rm_line_hi", ""))),
+                                                         offers_hi.get("rm_line_hi", ""), sarthi.target(ctx), referral_reward(ctx))),
         "sarthi_status": ("active" if sarthi_active else "not activated" if sarthi_active is False else "unknown"),
         "priority": TIER_BADGE.get(lead.get("heat_tier") or "cold"),
     }

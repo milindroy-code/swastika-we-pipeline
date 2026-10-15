@@ -14,7 +14,7 @@ working_hours:
 # Built around the 4-hour NPC rule: numbers dialled 10:00-13:00 come back 14:00-17:00 the same day.
 day_structure:
   - { time: "10:00", block: "Huddle with your SM (15 min): morning note, yesterday's misses, market notes. Then clear every overdue / carry-over follow-up" }
-  - { time: "11:00", block: "🔥 Hot and 🌤️ warm leads first: research-active and order-attempt clients while the market is open" }
+  - { time: "11:00", block: "🔥 Hot and 🌤️ warm clients first: research-active and order-attempt clients while the market is open" }
   - { time: "12:00", block: "Fresh sign-ups (registered 0-7 days, no deposit): first calls and welcome / onboarding" }
   - { time: "13:00", block: "Lunch", nudge: false }
   - { time: "14:00", block: "NPC round 1: morning not-picked-up numbers come back now (4 h rule), plus promised callbacks due" }
@@ -32,6 +32,9 @@ rules:
   escalate_after_minutes: 60    # overdue by this much -> escalated to the manager, counted as a miss
   stale_after_days: 3           # open lead with no contact for this long -> system follow-up
   sync_interval_minutes: 5      # how often `run.py loop` syncs sources and checks follow-ups
+  default_followup_hours: 24    # spoke to them but no time agreed: follow up again after this
+  not_interested_revisit_days: 7  # 'Not interested': one more try after this; a second 'not interested' closes
+  unreachable_revisit_days: 7   # after the NPC limit: one more round after this; unreachable again closes
   minutes_per_call: 5           # a GM's pace: bulk first calls are spaced this far apart, highest priority first
 
 sources:
@@ -80,7 +83,7 @@ sources:
       LEFT JOIN [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F
           ON C.CLIENT_ID = F.CLIENT_ID
       WHERE
-          C.REGISTRATION_DATE >= DATEADD(DAY, -30, CAST(GETDATE() AS DATE))
+          C.REGISTRATION_DATE >= DATEADD(DAY, -{window_days}, CAST(GETDATE() AS DATE))
           AND (
               F.FirstDepositDate IS NULL
               OR F.FirstDeposit IS NULL
@@ -90,10 +93,16 @@ sources:
           DaysSinceRegistration ASC;
     # Clients who have deposited recently: their open leads are closed as converted.
     deposits_query: |
-      SELECT F.CLIENT_ID, F.FirstDepositDate
+      SELECT F.CLIENT_ID, F.FirstDeposit, F.FirstDepositDate
       FROM [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F
       WHERE F.FirstDeposit > 0
         AND F.FirstDepositDate >= DATEADD(DAY, -45, CAST(GETDATE() AS DATE));
+    # Customer list → "Get the client list": each list type's clients come from these read-only queries.
+    # No deposit uses new_clients_query above. Low margin and re-activation have built-in queries (first deposit under the
+    # funding target; last trade between reactivation.churn_min_days and churn_max_days ago); set low_margin_query /
+    # reactivation_query here to override. Payouts need payout_query (must return CLIENT_ID); until then upload the list.
+    payout_query: ""
+    centralised_default: true   # "Get the client list" starts on centralised clients only (see `centralised` below)
 
   webengage:
     folder: data/webengage    # drop WebEngage CSV/XLSX exports here; each file is loaded once
@@ -139,7 +148,15 @@ heat:
   core_weight: 10
   non_core_weight: 3
   recency_half_life_days: 3
+  # Hourly recency (WebEngage pivots are hourly). "hourly": recency from the hours since last done, blending the slow
+  # half-life above with a fast one, and each hour's repeats decayed by their own age; "last_seen": the old day-level rule.
+  recency_mode: last_seen               # hourly is built and tested; switch on once the "hours ago" clock is decided
+  fast_half_life_hours: 6               # the "active right now" part: 1 h ago 0.97, 20 h ago 0.60, 3 days ago 0.35
+  fast_share: 0.3                       # weight of the fast part (0 = the old curve)
+  active_days_window: 7                 # day-level engagement: distinct active days in the last N days...
+  active_days_bonus: 0.3                # ...active every day adds up to +30% to the activity points
   frequency_cap: 4
+  app_history_weight: 0.25             # uploaded app-history score: heat = stronger of (live app, history) + this x the other
   score_scale: 35                      # tuned on the 4-7 Oct file: ~17% hot, ~14% warm
   lookback_days: 30
   tiers: { hot: 70, warm: 40 }          # score >= 70 is hot, >= 40 warm, otherwise cold
@@ -157,13 +174,28 @@ heat:
 
 # Payout lists (uploaded on Customer list with "Customers doing a payout"): money is leaving, so every customer goes
 # to a GM, first in line. The retention pitch never delays or discourages the withdrawal.
+# Centralised client: the business "Vertical" rule (payout and funding reports). A direct client (IsDirect = 1; partnership
+# clients never are) whose Sub_Branch_Code is one of these or starts with one of the prefixes. Used by the activation
+# lists, payouts and the referral drive.
+centralised:
+  direct_only: true
+  sub_branches: [BPL, SHRSHP, GO, PUSS, HRN, HOBR, HORET, G-ZSM2, G-ZSM1, G-ASM1, G-ASM2, PUDS, PUVT, TB, TELE, GOVPD]
+  prefixes: [DT]
+
 payout:
   first_call_minutes: 30
+  # "Get the client list" for payouts: a payout of more than share_of_balance of the balance just before it, in the last
+  # pull_days. Balance = pay-ins minus payouts over balance_days (back-office ledger, FA_TRANSACTIONS).
+  share_of_balance: 0.25
+  pull_days: 7
+  balance_days: 365
 
 # Re-activation lists (uploaded on Customer list with "Re-activation customers"): low hit rate, so they reach a GM
 # only once their app activity puts them in one of these heat tiers. Until then they wait in a "watching" pool.
 reactivation:
   assign_tiers: [hot, warm]
+  churn_min_days: 90     # "Get the client list" for re-activation: last trade at least this many days ago...
+  churn_max_days: 365    # ...and no more than this many
 
 # Map your sheet's categories to a lifecycle stage so the right playbook is used.
 # Stages: kyc_pending, kyc_no_deposit, funded_no_trade, dormant_trader, active_trader.
@@ -249,7 +281,7 @@ propositions:
     for: [all]
     pitch_hi: "Sarthi ready trade ideas deta hai: entry, target, stop-loss ke saath. Research ki tension nahi, faisla aapka"
   - name: Discount brokerage
-    for: [kyc_no_deposit, funded_no_trade, dormant_trader, payout]
+    for: [kyc_no_deposit, funded_no_trade, dormant_trader, payout, referral]
     pitch_hi: "Brokerage Groww / Zerodha jaisi discount wali, upar se Sarthi ideas aur alerts included"
   - name: Recommendations and alerts
     for: [kyc_no_deposit, funded_no_trade, dormant_trader, active_trader]
@@ -258,13 +290,60 @@ propositions:
     for: [dormant_trader, active_trader, payout]
     pitch_hi: "Trades manage karna mushkil lage toh dedicated Relationship Manager (RM) saath rahega"
 
+# Referral asks: our most active traders (cash + F&O trades, last `days` days; query: sources.client_db.referral_query,
+# default in wepipeline/referral.py) are thanked and asked for a referral. They sit beside the funding work: each GM gets
+# `daily_per_gm` of them per day on top of capacity, called after the market closes.
+referral:
+  buckets: [Very High, High, Medium]  # ActivityBucket values that get a referral ask (Very High >= 100, High >= 50, Medium >= 20 trades)
+  days: 60                      # look-back for the trade count
+  daily_per_gm: 5               # referral asks per GM per day (Admin: rules can change it)
+  cooldown_days: 60             # a client is asked at most once in this window (Admin: rules)
+  call_from: "15:45"            # after the market close: active traders are busy while it's open
+  refresh_hours: 24             # re-pull most active traders + referral history this often (scheduler / dashboard open)
+  max_attempts: 3               # NPCs before a referral ask is dropped (no second round: these are good clients)
+  scope: central                # who the drive targets: central (see `centralised`) / non_central / all
+  reward_referrer: 0            # ₹ to the client who refers (e.g. 750); set on Admin: rules. 0 = no amount is quoted
+  reward_friend: 0              # ₹ to the friend once they make their first trade on the app; Admin: rules
+  reward_hi: ""                 # optional custom wording; blank = built from the two amounts above
+  # Referral score (0-100, capped; same 🔥 ≥ 70 / 🌤️ ≥ 40 tiers as app heat). Run from the referral dashboard (port 8503).
+  score:
+    trades_full: 150            # trades in the window for all of trades_points (square-root curve below that)
+    trades_points: 40
+    days_points: 25             # trading on every trading day of the window
+    recent_days: 3              # last trade within this many days...
+    recent_points: 10           # ...earns these (half within a week)
+    app_points: 15              # app heat 100 earns all of these (trading + app = the activity track)
+    # referral-history track (0-100): how many they referred (square-root curve, all points at referrals_full)
+    referrals_points: 60
+    referrals_full: 5
+    active_referrals_points: 40 # how many of their referrals made a first trade (all points at active_referrals_full)
+    history_half_life_days: 365 # the track halves for each year since their last referral...
+    history_floor: 0.5          # ...but never below half
+    others_share: 0.25          # final = strongest of activity / history / campaign engagement + this share of the other two
+    active_referrals_full: 3
+
+# Sarthi activation drives (dashboard: streamlit run sarthi_app.py --server.port 8504). Target list: clients with
+# Sarthi switched off in the client database (account open) who trade (trade_buckets), use the app (min_app_heat),
+# or engaged with a Sarthi channel campaign. Success = Sarthi switched on (SarthiActivationDate) after the campaign started.
+sarthi_activation:
+  trade_buckets: [Very High, High, Medium, Low]   # trade query buckets in the target list (Low = 5+ trades in `days`)
+  days: 60
+  min_app_heat: 20              # app users with Sarthi off need this app heat (or any Sarthi interest) to be called
+  daily_per_gm: 10              # default batch per GM when an SM starts a drive (Admin: rules)
+  cooldown_days: 30             # a client is asked at most once in this window (Admin: rules)
+  call_from: "10:30"
+  refresh_hours: 24             # re-pull activations + traders + app users this often
+  max_attempts: 3               # NPCs before an ask is dropped
+  results_days: 120             # activations kept for the report
+
 # How assertive the close is: GMs ask for the full target first, then fall back to a first step plus a set top-up time.
 closing:
   fallback_amount: 10000        # first step if ₹30k isn't possible today; the rest is booked as a top-up follow-up
 
 # OKR: an account counts as funded at this deposit. Every funding ask in the pitch aims for it, and reports count
 # conversions at or above it ("Funded ≥ ₹30k").
-funding_target: 30000
+funding_target: 30000            # default; the admin can change it on Admin: rules
+registration_window_days: 30     # new clients are worked this long after registering (Admin: rules); feeds the SQL pull
 
 # Sarthi: the hero feature in every pitch (ready trade ideas in equity, F&O, commodities). Its track record is
 # entered by the admin on "Admin: rules" from official data; nothing is shown until it is entered.

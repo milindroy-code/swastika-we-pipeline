@@ -23,7 +23,9 @@ from .insights import customer_insight
 log = logging.getLogger(__name__)
 
 COLUMNS = [
-    ("Rank", "rank"), ("Priority", "priority"), ("Heat score", "heat"), ("Client code", "client"), ("Name", "name"),
+    ("Rank", "rank"), ("Priority", "priority"), ("Heat score", "heat"), ("Client code", "client"),
+    ("Insight", "script_insight"), ("Call script", "script_text"), ("Ask (call to action)", "script_ask"),
+    ("Name", "name"),
     ("Phone", "phone"), ("Category", "category"), ("Registered on", "registered_on"),
     ("Days since registration", "days_since_registration"), ("Deposit status", "deposit_status"),
     ("First deposit date", "first_deposit_date"), ("Last trade date", "last_trade_date"),
@@ -43,22 +45,30 @@ TIER_COLORS = {"🔥 Hot": {"red": 0.99, "green": 0.87, "blue": 0.85}, "🌤️ 
                "❄️ Cold": {"red": 0.9, "green": 0.94, "blue": 0.99}}
 
 
-def build_rows(ctx: Ctx, lead_id: str | None = None) -> list[dict]:
-    """Every lead (or just one), open ones first by priority, then everything else."""
+def build_rows(ctx: Ctx, lead_id: str | None = None, lead_ids: list[str] | None = None) -> list[dict]:
+    """Every lead (or just one, or just these), open ones first by priority, then everything else."""
     now = ctx.now()
     stamp = now.strftime("%d %b %H:%M")
     grace = ctx.rules.get("warning_after_minutes", 15)
-    only = " WHERE lead_id=?" if lead_id else ""
-    args = (lead_id,) if lead_id else ()
+    if lead_ids is not None:
+        if not lead_ids:
+            return []
+        ids = sorted(set(lead_ids))
+        only, args = f" WHERE lead_id IN ({','.join('?' * len(ids))})", tuple(ids)
+    else:
+        only = " WHERE lead_id=?" if lead_id else ""
+        args = (lead_id,) if lead_id else ()
     calls = {r["lead_id"]: r for r in rows(ctx.conn, f"SELECT lead_id, COUNT(*) n, MAX(called_at) last FROM calls{only} GROUP BY lead_id", args)}
     notes = {}
     for r in rows(ctx.conn, f"SELECT lead_id, notes FROM calls{only} ORDER BY called_at", args):
         notes[r["lead_id"]] = r["notes"] or ""  # ascending, so the latest call's notes are kept
     nexts = {}
-    pending = " AND lead_id=?" if lead_id else ""
+    pending = (" AND" + only[6:]) if only else ""
     for f in rows(ctx.conn, f"SELECT lead_id, due_at, kind FROM followups WHERE status='pending'{pending} ORDER BY due_at DESC", args):
         nexts[f["lead_id"]] = f  # rows come latest-first, so the earliest due one is kept
-    leads = rows(ctx.conn, f"SELECT * FROM leads{only} ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, heat_score DESC, first_seen_at DESC", args)
+    # referral / Sarthi drives and their pool-only clients (status 'drive') have their own dashboards
+    scope = (only + " AND" if only else " WHERE") + " COALESCE(campaign,'') NOT IN ('referral','sarthi') AND status<>'drive'"
+    leads = rows(ctx.conn, f"SELECT * FROM leads{scope} ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, heat_score DESC, first_seen_at DESC", args)
     out = []
     for rank, lead in enumerate(leads, 1):
         ins = customer_insight(ctx, lead)
@@ -71,14 +81,16 @@ def build_rows(ctx: Ctx, lead_id: str | None = None) -> list[dict]:
             "rank": rank if lead["status"] == "open" else "",
             "heat": round(lead["heat_score"] or 0),
             "client": lead["we_user_id"] or lead["lead_id"],
+            "lead_id": lead["lead_id"],
             "name": lead["name"] or "",
             "phone": lead["phone"] or "",
             "category": lead["category"] or "",
             "status": lead["status"],
-            "gm": gm.get("name", ("Waiting for capacity" if engaged_enough(ctx, lead)
+            "gm": gm.get("name", ("Waiting for Assign (SM)" if lead.get("on_hold")
+                                  else "Waiting for capacity" if engaged_enough(ctx, lead)
                                   else "Waiting for engagement (re-activation)") if lead["status"] == "open" else ""),
             "list": {"new": "New, no deposit", "low_margin": "Low margin", "reactivation": "Churned, active again",
-                     "payout": "Payout"}.get(lead.get("campaign") or "", ""),
+                     "payout": "Payout", "referral": "Referral ask", "sarthi": "Sarthi activation"}.get(lead.get("campaign") or "", ""),
             "sm": (ctx.member(ctx.sm_of(gm)) or {}).get("name", ""),
             "next_due": due.strftime("%d %b %H:%M") if due else "",
             "next_kind": KIND_LABELS.get(nxt["kind"], "") if nxt else "",

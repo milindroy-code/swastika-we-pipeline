@@ -8,7 +8,7 @@ from datetime import timedelta
 from .context import Ctx, iso, parse_dt
 from .db import rows
 
-STAGES = ["kyc_pending", "kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader", "payout", "low_margin"]
+STAGES = ["kyc_pending", "kyc_no_deposit", "funded_no_trade", "dormant_trader", "active_trader", "payout", "low_margin", "referral", "sarthi_activation"]
 INSTRUMENT_KEYS = ["symbol", "scrip", "stock", "instrument", "stock name", "scrip name", "ticker"]
 AMOUNT_KEYS = ["amount", "deposit amount", "value", "order value"]
 
@@ -78,7 +78,8 @@ def summarize(ctx: Ctx, lead: dict, days: int = 30) -> dict:
             summary["last_amount"] = _attr(attrs, AMOUNT_KEYS)
         if len(summary["recent"]) < 8:
             summary["recent"].append({"event": ev["event_name"], "time": ev["event_time"], "count": n})
-    summary["events_30d"] = len(events)
+    summary["events_30d"] = sum(int(a["count"]) if str((a := json.loads(e["attrs"] or "{}")).get("count", "")).isdigit() else 1
+                                for e in events)
     summary["last_seen"] = events[0]["event_time"] if events else None
     summary["instruments"] = [name for name, _ in instruments.most_common(5)]
     summary["segments"] = [name for name, _ in segments.most_common(3)]
@@ -89,6 +90,10 @@ def summarize(ctx: Ctx, lead: dict, days: int = 30) -> dict:
 def stage_for(ctx: Ctx, lead: dict, summary: dict) -> str:
     if lead.get("campaign") == "payout":  # a withdrawal request outranks everything else we know about the client
         return "payout"
+    if lead.get("campaign") == "referral":  # one of our most active traders: thank them, ask for a referral
+        return "referral"
+    if lead.get("campaign") == "sarthi":  # Sarthi switched off: show it, switch it on together
+        return "sarthi_activation"
     if lead.get("campaign") == "low_margin":  # funded, but below the funded-account target
         return "low_margin"
     known = json.loads(lead.get("extra") or "{}").get("stage")  # from the client database (deposit / trade dates)

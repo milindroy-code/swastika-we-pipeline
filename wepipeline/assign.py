@@ -11,14 +11,17 @@ from .heat import first_call_sla
 
 def open_load(ctx: Ctx) -> dict[str, int]:
     load = {m["id"]: 0 for m in ctx.callers()}
-    for r in rows(ctx.conn, "SELECT assigned_to, COUNT(*) AS n FROM leads WHERE status='open' AND assigned_to IS NOT NULL GROUP BY assigned_to"):
+    for r in rows(ctx.conn, "SELECT assigned_to, COUNT(*) AS n FROM leads WHERE status='open' AND assigned_to IS NOT NULL "
+                           "AND COALESCE(campaign,'') NOT IN ('referral','sarthi') GROUP BY assigned_to"):
         if r["assigned_to"] in load:
             load[r["assigned_to"]] = r["n"]
     return load
 
 
-def pick_caller(ctx: Ctx, category: str, load: dict[str, int]) -> str | None:
+def pick_caller(ctx: Ctx, category: str, load: dict[str, int], payout: bool = False) -> str | None:
     available = [m for m in ctx.callers() if load.get(m["id"], 0) < m.get("capacity", 50)]
+    if not available and payout:
+        available = list(ctx.callers())  # money is leaving: a payout is never held back for capacity
     if not available:
         return None
     specialists = [m for m in available if category and category in (m.get("categories") or [])]
@@ -32,7 +35,7 @@ def first_followup(ctx: Ctx, lead: dict):
     hints = seed_hints(lead)
     promised = parse_dt(hints.get("next_followup_at"), ctx.tz)
     if promised:
-        return max(promised, now), "promised", "Follow-up time carried over from sheet"
+        return ctx.roll_to_working_hours(max(promised, now)), "promised", "Follow-up time carried over from sheet"
     npc_statuses = {s.lower() for s in ctx.cfg["sources"]["leads"].get("npc_statuses", [])}
     last_call = parse_dt(hints.get("last_call_at"), ctx.tz)
     if hints.get("last_call_status", "").strip().lower() in npc_statuses and last_call:
@@ -41,7 +44,7 @@ def first_followup(ctx: Ctx, lead: dict):
     if lead.get("campaign") == "payout":  # money is leaving: call fast, whatever the heat score
         minutes = int((ctx.cfg.get("payout") or {}).get("first_call_minutes", 30))
         return (ctx.roll_to_working_hours(ctx.roll_to_working_hours(now) + timedelta(minutes=minutes)), "first_call",
-                "💸 Payout requested: call before the funds leave")
+                "💸 Payout requested: check in early (the payout proceeds as normal)")
     tier = lead.get("heat_tier") or "cold"
     reason = f"🔥 Hot new client: {lead['heat_reasons']}" if tier == "hot" and lead.get("heat_reasons") else "New client: introduce yourself"
     due = ctx.roll_to_working_hours(ctx.roll_to_working_hours(now) + first_call_sla(ctx, tier))
@@ -84,15 +87,15 @@ def rebalance(ctx: Ctx) -> int:
     Cold leads a GM has called or promised a callback stay where they are."""
     load, cap = open_load(ctx), {m["id"]: m.get("capacity", 50) for m in ctx.callers()}
     free = sum(max(cap[g] - load.get(g, 0), 0) for g in cap)
-    waiting = [l for l in rows(ctx.conn, "SELECT * FROM leads WHERE status='open' AND assigned_to IS NULL "
-                                         "AND (campaign='payout' OR heat_tier IN ('hot','warm')) "
+    waiting = [l for l in rows(ctx.conn, "SELECT * FROM leads WHERE status='open' AND assigned_to IS NULL AND on_hold=0 "
+                                         "AND (campaign='payout' OR heat_tier IN ('hot','warm')) AND COALESCE(campaign,'') NOT IN ('referral','sarthi') "
                                          f"ORDER BY {PRIORITY_SQL}, heat_score DESC") if engaged_enough(ctx, l)]
     need = max(len(waiting) - free, 0)
     if not need:
         return 0
     released = 0
     for lead in rows(ctx.conn, "SELECT lead_id FROM leads WHERE status='open' AND assigned_to IS NOT NULL "
-                               "AND heat_tier='cold' AND campaign<>'payout' ORDER BY heat_score, assigned_at DESC"):
+                               "AND heat_tier='cold' AND COALESCE(campaign,'') NOT IN ('payout','referral','sarthi') ORDER BY heat_score, assigned_at DESC"):
         if released >= need:
             break
         if _unworked(ctx, lead["lead_id"]):
@@ -130,12 +133,13 @@ def assign_new_leads(ctx: Ctx) -> dict:
     pace = timedelta(minutes=minutes_per_call(ctx))
     slot = {}  # per GM: the next free first-call slot in this run
     # Hottest leads first, so they get a caller even when capacity runs out.
-    for lead in rows(ctx.conn, "SELECT * FROM leads WHERE assigned_to IS NULL AND status='open' "
+    for lead in rows(ctx.conn, "SELECT * FROM leads WHERE assigned_to IS NULL AND status='open' AND on_hold=0 "  # held: SM assigns
+                               "AND COALESCE(campaign,'') NOT IN ('referral','sarthi') "  # referral asks have their own daily quota
                                f"ORDER BY {PRIORITY_SQL}, heat_score DESC, first_seen_at, lead_id"):
         if not engaged_enough(ctx, lead):
             watching += 1  # held back until their app activity makes them warm or hot
             continue
-        caller = pick_caller(ctx, lead["category"], load)
+        caller = pick_caller(ctx, lead["category"], load, payout=lead.get("campaign") == "payout")
         if caller is None:
             unassigned += 1
             continue

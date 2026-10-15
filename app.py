@@ -12,19 +12,20 @@ import pandas as pd
 import streamlit as st
 
 from wepipeline import jobs
+from wepipeline.sarthi import target as sarthi_target
 from wepipeline.activity import humanize_ago, summarize
 from wepipeline.context import iso, parse_dt
 from wepipeline.db import one, open_ctx, rows
 from wepipeline.heat import TIER_BADGE
 from wepipeline.followups import KIND_LABELS, OUTCOMES, log_call, queue_for, reassign_lead
 from wepipeline.ingest import sync_webengage
-from wepipeline.admin import RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, current_sla, save_rules
+from wepipeline.admin import RULE_DEFAULTS, RULE_FIELDS, SLA_TIERS, admin_pin, check_pin, current_sla, save_rules
 from wepipeline.db import set_setting
 from wepipeline.sheet_export import COLUMNS, build_rows, export, update_customer_row
 from wepipeline.insights import customer_insight
 from wepipeline import sarthi
 from wepipeline.team import save_routine, save_team
-from wepipeline.upload import LIST_TYPES, analyse_upload, batch_rows, batch_workbook, list_uploads
+from wepipeline.upload import LIST_TYPES, analyse_upload, assign_upload, batch_rows, batch_workbook, held_count, list_uploads
 from wepipeline.clientdb import available as client_db_available
 from wepipeline.dialer import DUE_NOW, OVERDUE, dialer_queue, dismiss, next_call, reminders, urgency_counts
 from wepipeline.market import live_notes, refresh as refresh_market
@@ -41,7 +42,7 @@ STATUS_COLORS = {"On time": "#0ca30c", "Late": "#fab219", "Overdue": "#ec835a", 
 def _secrets_to_env() -> None:
     """On Streamlit Community Cloud, DATABASE_URL (and optional ANTHROPIC_API_KEY) come from the app's Secrets."""
     try:
-        for key in ("DATABASE_URL", "ADMIN_PIN", "ANTHROPIC_API_KEY", "SMTP_PASSWORD"):
+        for key in ("DATABASE_URL", "ADMIN_PIN", "ANTHROPIC_API_KEY", "SMTP_PASSWORD", "REFERRAL_DASHBOARD_URL", "SARTHI_DASHBOARD_URL"):
             if key in st.secrets and not os.environ.get(key):
                 os.environ[key] = str(st.secrets[key])
     except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
@@ -166,7 +167,11 @@ def lead_panel(lead: dict, agent_id: str, key: str) -> None:
             for h in history:
                 st.caption(f"{fmt(h['called_at'])} · {OUTCOMES[h['outcome']]['label']} · {h['notes'] or ''}")
     with right:
-        tab_call, tab_rule, tab_ai = st.tabs(["Call plan", "Playbook", "AI pitch"])
+        tab_script, tab_call, tab_rule, tab_ai = st.tabs(["Call script", "Call plan", "Playbook", "AI pitch"])
+        with tab_script:
+            st.info("**💡 Insight**  " + chr(10) + ins["script_insight"].replace(chr(10), "  " + chr(10)))
+            st.markdown(ins["script_text"].replace("\n", "  \n"))
+            st.success("**🎯 Ask**  \n" + ins["script_ask"].replace("\n", "  \n"))
         with tab_call:
             st.markdown(f"**Opener:** {ins['opener']}")
             if ins["levers"]:
@@ -283,7 +288,8 @@ def urgency_strip(agent_id: str) -> None:
         for r in active:
             b1, b2 = st.columns([6, 1])
             if b1.button(f"{r['icon']} {r['text']}", key=f"rem_{r['key']}", width="stretch"):
-                st.session_state[f"dial_{agent_id}"] = r["lead_id"]  # pinned leads load even if not due yet
+                _clear_card(st.session_state.get(f"dial_{agent_id}"))
+                st.session_state[f"dial_{agent_id}"] = r["lead_id"]  # pinned clients load even if not due yet
                 dismiss(ctx, r)
                 dismissed.add(r["key"])
                 st.rerun()
@@ -302,7 +308,7 @@ def urgency_strip(agent_id: str) -> None:
     c[3].metric("Due now", n["due_now"])
     pct = today_row.get("compliance_pct")
     c[4].metric("Calls today · on time", f"{today_row.get('calls', 0)} · {f'{pct:.0f}%' if pct is not None else 'n/a'}")
-    goal = int(ctx.cfg.get("funding_target") or 0)
+    goal = sarthi_target(ctx)
     if goal:
         st.caption(f"🎯 Today: {today_row.get('funded_target', 0)} account(s) funded ≥ ₹{goal:,} · "
                    f"₹{today_row.get('deposits', 0):,} deposited on your calls")
@@ -310,12 +316,18 @@ def urgency_strip(agent_id: str) -> None:
         st.error(f"⚠️ {n['escalating_soon']} follow-up(s) will be escalated to your SM within 15 minutes. They are first in line below.")
 
 
-def _log_and_advance(agent_id: str, lead_id: str, outcome: str, notes: str, next_at=None, deposit_amount=None) -> None:
+def _log_and_advance(agent_id: str, lead_id: str, outcome: str, notes: str, next_at=None, deposit_amount=None,
+                     referrals_text: str = "") -> None:
     try:
-        res = log_call(ctx, lead_id, agent_id, outcome, notes, next_at, deposit_amount=deposit_amount)
+        res = log_call(ctx, lead_id, agent_id, outcome, notes or (referrals_text.strip()[:200] if referrals_text else ""),
+                       next_at, deposit_amount=deposit_amount)
     except ValueError as e:
         st.error(str(e))
         return
+    if referrals_text:
+        from wepipeline.referral import record_referrals
+
+        record_referrals(ctx, lead_id, agent_id, referrals_text)
     st.session_state.pop(f"dial_{agent_id}", None)
     st.toast(f"Saved: {OUTCOMES[outcome]['label']}. Next follow-up: {fmt(res['next_due']) or 'none'}. Loading the next call…")
     try:
@@ -332,8 +344,11 @@ def _chip(text: str, color: str = "gray") -> str:
 
 STAGE_NAMES = {"kyc pending": "KYC pending", "kyc no deposit": "No deposit yet", "funded no trade": "Funded, no trade yet",
                "dormant trader": "Dormant trader", "active trader": "Active trader", "payout": "💸 Payout requested",
-               "low margin": "Low margin (under ₹30k)"}
-LIST_LABELS = {"new": "New, no deposit", "low_margin": "Low margin", "reactivation": "Churned, active again", "payout": "Payout"}
+               "low margin": "Low margin (under the target)"}
+REFERRAL_URL = os.environ.get("REFERRAL_DASHBOARD_URL", "http://localhost:8503")
+SARTHI_URL = os.environ.get("SARTHI_DASHBOARD_URL", "http://localhost:8504")
+LIST_LABELS = {"new": "New, no deposit", "low_margin": "Low margin", "reactivation": "Churned, active again", "payout": "Payout",
+               "referral": "Referral ask"}
 
 
 def _stage_line(ins: dict) -> str:
@@ -357,6 +372,9 @@ def call_card(agent_id: str, q: dict) -> None:
         head.markdown(f"## {TIER_BADGE.get(lead['heat_tier'], '').split()[0]} {who}")
         head.markdown(_chip(q["urgency"], urgency_color) + " " + _chip(f"heat {lead['heat_score']:.0f}", "violet")
                       + " " + _chip(KIND_LABELS.get(q["kind"], q["kind"]), "gray"))
+        if q.get("also_pending"):
+            head.caption("This call also covers: " + "; ".join(
+                f"{KIND_LABELS.get(p['kind'], p['kind'])} due {fmt(p['due_at'])}" for p in q["also_pending"]))
         if lead["phone"]:
             act1.link_button("📞 Call", f"tel:+91{lead['phone']}", type="primary", width="stretch")
         else:
@@ -365,6 +383,7 @@ def call_card(agent_id: str, q: dict) -> None:
         if act2.button("⏭️ Skip", key=f"skip_{lid}", width="stretch", help="Move this customer to the back of the line"):
             st.session_state.setdefault(f"skipped_{agent_id}", set()).add(lid)
             st.session_state.pop(f"dial_{agent_id}", None)
+            _clear_card(lid)
             st.rerun()
 
         # 2. four facts that matter on the call
@@ -376,14 +395,19 @@ def call_card(agent_id: str, q: dict) -> None:
                   if last else "First call")]
         st.markdown("  ".join(_chip(f"{i} {t}", "blue") for i, t in facts if t))
 
-        # 3. call ideas: what the data says, and an angle to take (the GM uses their own words)
-        st.markdown("**💡 Call ideas** · data → angle")
-        for n, idea in enumerate(ins["call_ideas"], 1):
-            st.markdown(f"{n}. :blue-background[{idea['fact']}] → {idea['angle']}")
-        if ins["propositions"]:
-            st.markdown("**🧰 Swastika ka offer stack** (jo fit ho, wahi bolo)  \n" + "  \n".join(f"• {p}" for p in ins["propositions"]))
-        st.markdown("**🎯 Close**  \n" + "  \n".join(f"{n}. {c}" for n, c in enumerate(ins["closing"], 1)))
+        # 3. the simple script: one insight, steps to read out, and the ask
+        st.info("**💡 Insight**  " + chr(10) + ins["script_insight"].replace(chr(10), "  " + chr(10)))
+        st.markdown("**📝 Call script**  \n" + ins["script_text"].replace("\n", "  \n"))
+        st.success("**🎯 Ask**  \n" + ins["script_ask"].replace("\n", "  \n"))
         st.caption("**Agar customer bole:** " + ins["objections_hi"])
+
+        # call ideas: what the data says, and an angle to take, for GMs who want more than the script
+        with st.expander("More call ideas (data → angle)"):
+            for n, idea in enumerate(ins["call_ideas"], 1):
+                st.markdown(f"{n}. :blue-background[{idea['fact']}] → {idea['angle']}")
+            if ins["propositions"]:
+                st.markdown("**🧰 Swastika ka offer stack** (jo fit ho, wahi bolo)  \n" + "  \n".join(f"• {p}" for p in ins["propositions"]))
+            st.markdown("**🎯 Close**  \n" + "  \n".join(f"{n}. {c}" for n, c in enumerate(ins["closing"], 1)))
 
         # 4. the rest, folded away
         with st.expander("More about this customer"):
@@ -414,6 +438,8 @@ def call_card(agent_id: str, q: dict) -> None:
 NO_REACH = [("not_picked", "📵 Not picked up"), ("busy", "⏳ Busy"), ("switched_off", "📴 Switched off"), ("wrong_number", "❌ Wrong number")]
 REACHED_OPTIONS = [("converted", "💰 Converted"), ("interested", "✅ Interested"), ("callback_requested", "🔁 Wants a call back"),
                    ("not_interested", "🙅 Not interested")]
+REFERRAL_OPTIONS = [("referral_given", "🤝 Gave referral(s)"), ("interested", "✅ Will share later"),
+                    ("callback_requested", "🔁 Wants a call back"), ("not_interested", "🙅 Not interested")]
 WHEN_CHOICES = ["In 1 h", "In 2 h", "Tomorrow 11:00", "Tomorrow 16:00", "Pick a time"]
 
 
@@ -450,7 +476,8 @@ def outcome_panel(agent_id: str, lead: dict) -> None:
         st.caption(f"Not picked up / busy / switched off come back to your queue automatically in {npc_h:g} h.")
         st.markdown("**Spoke to them?** Pick how it went.")
         cols = st.columns(4)
-        for col, (outcome, label) in zip(cols, REACHED_OPTIONS):
+        options = REFERRAL_OPTIONS if lead.get("campaign") == "referral" else REACHED_OPTIONS
+        for col, (outcome, label) in zip(cols, options):
             if col.button(label, key=f"o_{outcome}_{lid}", width="stretch", type="primary"):
                 st.session_state[f"outcome_{lid}"] = outcome
                 st.rerun()
@@ -467,10 +494,20 @@ def outcome_panel(agent_id: str, lead: dict) -> None:
                               placeholder="e.g. Will add ₹5,000 by UPI tonight")
         when = None
         deposit = None
+        friends = ""
+        if picked == "referral_given":
+            friends = st.text_area("Friends referred: name and number, one per line", key=f"ref_{lid}",
+                                   placeholder="Rahul Sharma, 98xxxxxx01\nPriya, 97xxxxxx22",
+                                   help="Only with the friend's consent: they'll get a call from us.")
         if picked == "converted":
-            goal = int(ctx.cfg.get("funding_target") or 0)
-            deposit = st.number_input("Deposit amount (₹)", min_value=0, value=goal or 0, step=1000, key=f"dep_{lid}",
-                                      help=f"Funded-account target (OKR): ₹{goal:,}")
+            goal = sarthi_target(ctx)
+            had = float(json.loads(lead.get("extra") or "{}").get("current_margin") or 0)
+            deposit = st.number_input("Money added on this call (₹)", min_value=0, value=None, step=1000, key=f"dep_{lid}",
+                                      placeholder="e.g. 10000",
+                                      help=f"Only the new money, not what was already in the account"
+                                           + (f" (₹{had:,.0f})" if had else "") + f". Funded-account target (OKR): ₹{goal:,}")
+            if had and deposit:
+                st.caption(f"Account now ₹{had + deposit:,.0f} of the ₹{goal:,} target.")
             if goal and deposit and deposit < goal:
                 st.caption(f"Below the ₹{goal:,} target: schedule a top-up follow-up if they agreed to add more.")
         if picked in {"interested", "callback_requested"}:
@@ -483,11 +520,21 @@ def outcome_panel(agent_id: str, lead: dict) -> None:
         if st.button("💾 Save & next call", key=f"save_{lid}", type="primary", width="stretch"):
             if picked == "callback_requested" and not when:
                 st.error("Pick when to call back.")
+            elif picked == "converted" and not deposit:
+                st.error("Enter the amount the client added on this call.")
+            elif picked == "referral_given" and not friends.strip():
+                st.error("Add at least one friend's name and number.")
             elif when and when <= ctx.now():
                 st.error("The follow-up time must be in the future.")
             else:
                 st.session_state.pop(f"outcome_{lid}", None)
-                _log_and_advance(agent_id, lid, picked, notes, when, deposit_amount=deposit)
+                _log_and_advance(agent_id, lid, picked, notes, when, deposit_amount=deposit, referrals_text=friends)
+
+
+def _clear_card(lid: str | None) -> None:
+    """Forget a half-filled outcome panel when the GM moves away from that client."""
+    for k in ("outcome", "notes", "when", "dep", "ref"):
+        st.session_state.pop(f"{k}_{lid}", None)
 
 
 def dialer(agent_id: str) -> None:
@@ -519,6 +566,7 @@ def dialer(agent_id: str) -> None:
                 c1.markdown(f"{TIER_BADGE.get(q['heat_tier'], '').split()[0]} **{q['name'] or q['lead_id']}** · {q['urgency']}")
                 c2.caption(q["reason"] or KIND_LABELS.get(q["kind"], q["kind"]))
                 if c3.button("Call", key=f"jump_{q['id']}", width="stretch"):
+                    _clear_card(st.session_state.get(f"dial_{agent_id}"))
                     st.session_state[f"dial_{agent_id}"] = q["lead_id"]
                     st.rerun()
     if ahead and st.button("Stop calling ahead"):
@@ -555,13 +603,13 @@ def caller_leads(agent_id: str) -> None:
     if not leads:
         st.info("No clients assigned yet.")
         return
-    df = pd.DataFrame([{"priority": TIER_BADGE.get(l["heat_tier"]), "heat": round(l["heat_score"]), "lead": l["lead_id"],
+    df = pd.DataFrame([{"priority": TIER_BADGE.get(l["heat_tier"]), "heat": round(l["heat_score"]), "client code": l["lead_id"],
                         "name": l["name"], "phone": l["phone"], "category": l["category"], "status": l["status"],
                         "last outcome": OUTCOMES.get(l["last_outcome"] or "", {}).get("label", ""), "last contact": fmt(l["last_contact_at"]),
                         "NPC": l["npc_count"]} for l in leads])
     st.dataframe(df, hide_index=True, width="stretch")
     st.markdown("#### Log a call for any client (e.g. an inbound call)")
-    pick = st.selectbox("Lead", [l["lead_id"] for l in leads], format_func=lambda i: f"{i} · {lead_by_id(i)['name']}")
+    pick = st.selectbox("Client", [l["lead_id"] for l in leads], format_func=lambda i: f"{i} · {lead_by_id(i)['name']}")
     lead_panel(lead_by_id(pick), agent_id, f"any_{pick}")
 
 
@@ -607,7 +655,7 @@ def team_compliance() -> None:
                                       "WHERE f.status='pending' AND l.status='open' AND f.due_at<? ORDER BY f.due_at", (iso(now),))
             if f["agent_id"] in callers and classify(ctx, f, now) in {"overdue", "missed"}]
     if live:
-        st.dataframe(pd.DataFrame([{"GM": ctx.member(f["agent_id"])["name"], "lead": f["name"] or f["lead_id"], "phone": f["phone"],
+        st.dataframe(pd.DataFrame([{"GM": (ctx.member(f["agent_id"]) or {}).get("name", f["agent_id"]), "client": f["name"] or f["lead_id"], "phone": f["phone"],
                                     "type": KIND_LABELS.get(f["kind"]), "due": fmt(f["due_at"]),
                                     "late by": humanize_ago(ctx, f["due_at"]).replace(" ago", ""),
                                     "escalated": "yes" if f["missed"] else ""} for f in live]),
@@ -619,7 +667,7 @@ def team_compliance() -> None:
     hot = [l for l in rows(ctx.conn, "SELECT * FROM leads WHERE status='open' AND heat_tier='hot' AND last_contact_at IS NULL "
                                      "ORDER BY heat_score DESC") if l["assigned_to"] in callers]
     if hot:
-        st.dataframe(pd.DataFrame([{"heat": round(l["heat_score"]), "lead": l["lead_id"], "name": l["name"],
+        st.dataframe(pd.DataFrame([{"heat": round(l["heat_score"]), "client code": l["lead_id"], "name": l["name"],
                                     "GM": (ctx.member(l["assigned_to"]) or {}).get("name"), "assigned": fmt(l["assigned_at"]),
                                     "why hot": l["heat_reasons"]} for l in hot]), hide_index=True, width="stretch")
     else:
@@ -655,9 +703,10 @@ def leads_page() -> None:
         return
     df = pd.DataFrame(leads)
     c_list, c0, c1, c2, c3 = st.columns(5)
-    lists = c_list.multiselect("List", ["new", "low_margin", "reactivation", "payout", ""], format_func=lambda v: LIST_LABELS.get(v, "(none)"))
+    lists = c_list.multiselect("List", ["new", "low_margin", "reactivation", "payout", "referral", ""], format_func=lambda v: LIST_LABELS.get(v, "(none)"))
     tiers = c0.multiselect("Priority", ["hot", "warm", "cold"], format_func=TIER_BADGE.get)
-    status = c1.multiselect("Status", sorted(df["status"].unique()), default=["open"])
+    statuses = sorted(df["status"].unique())
+    status = c1.multiselect("Status", statuses, default=["open"] if "open" in statuses else [])
     owner = c2.multiselect("GM", [m["id"] for m in ctx.callers()], format_func=lambda i: ctx.member(i)["name"])
     cat = c3.multiselect("Category", sorted(df["category"].dropna().unique()))
     view = df[df["status"].isin(status)] if status else df
@@ -675,7 +724,7 @@ def leads_page() -> None:
 
     st.subheader("Reassign a client")
     with st.form("reassign"):
-        lead_id = st.selectbox("Lead", view["lead_id"].tolist(), format_func=lambda i: f"{i} · {lead_by_id(i)['name']}")
+        lead_id = st.selectbox("Client", view["lead_id"].tolist(), format_func=lambda i: f"{i} · {lead_by_id(i)['name']}")
         to = st.selectbox("New GM", [m["id"] for m in ctx.callers()], format_func=lambda i: ctx.member(i)["name"])
         if st.form_submit_button("Reassign") and lead_id:
             reassign_lead(ctx, lead_id, to)
@@ -724,7 +773,7 @@ def reports_page() -> None:
 def admin_page() -> None:
     st.subheader("WebEngage exports")
     st.info("To upload a list, go to **Customer list → 📤 Analyse a new list**: choose the category, upload the file, and it is "
-            "scored, ranked, assigned and pitched in one go. Files loaded so far:")
+            "scored, ranked and pitched; then press **Assign to GMs** on the results. Files loaded so far:")
     files = rows(ctx.conn, "SELECT path, kind, rows, ingested_at FROM ingested_files ORDER BY ingested_at DESC")
     if files:
         st.dataframe(pd.DataFrame(files), hide_index=True, width="stretch")
@@ -767,15 +816,134 @@ def _customer_rows(_ctx_id: int) -> list[dict]:
     return build_rows(ctx)
 
 
+PULL_PRESETS = {"no_deposit": "New clients without deposit", "low_margin": "New clients with low margin (under ₹{target})",
+                "reactivation": "Churned clients (last trade 90–365 days ago)", "payout": "Clients who made payouts (over 25% of balance, last 7 days)",
+                "custom": "My own list of client IDs"}
+
+
+def pull_section(db_ok: bool) -> None:
+    """① Get a client list: a preset from the client database, or your own list of client IDs. Count it, filter to centralised
+    clients and download the client IDs for the WebEngage team. Their event report comes back as the upload in ③."""
+    from wepipeline.clientdb import check_custom_list, list_query, pull_list, read_client_ids
+    from wepipeline.drives import read_file
+
+    st.markdown("① **Get the client list**, then send the client IDs to the WebEngage team for their event report.")
+    options = [k for k in PULL_PRESETS if k == "custom" or list_query(ctx, k)]
+    source = st.radio("Which clients?", options, horizontal=True, key="pull_source", index=None,
+                      format_func=lambda k: PULL_PRESETS[k].replace("{target}", f"{sarthi_target(ctx):,}"))
+    if source is None:
+        st.caption("Pick a preset list (pulled from the client database) or upload your own list of client IDs. "
+                   + ("Payouts appear here once their query is added." if "payout" not in options else ""))
+    elif source != "custom":
+        if st.button("🔎 Get the client list", disabled=not db_ok, key="pull_list",
+                     help="Read-only query on the client database." if db_ok else "Client database not reachable: connect to the VPN."):
+            with st.spinner("Running the query on the client database…"):
+                try:
+                    st.session_state["pulled_list"] = {"key": source, "source": PULL_PRESETS[source], "at": ctx.now(),
+                                                       "df": pull_list(ctx, source)}
+                    if st.session_state.get("sm_list_type") is None:  # pre-select the matching list type for the analysis
+                        st.session_state["sm_list_type"] = source
+                except Exception as e:
+                    st.error(f"The query failed: {type(e).__name__}: {str(e)[:300]}")
+                    return
+    else:
+        own = st.file_uploader("Your list: a CSV or Excel file with a client code column (or client codes in the first column)",
+                               type=["csv", "xlsx", "xls", "txt"], key=f"own_list_{st.session_state.get('own_nonce', 0)}")
+        if own is not None and st.button("🔎 Check my list", disabled=not db_ok, key="check_own",
+                                         help="Matches each client ID in the client database (read-only) and flags centralised clients."
+                                         if db_ok else "Client database not reachable: connect to the VPN."):
+            folder = ctx.path("data/uploads")
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{ctx.now():%Y%m%d_%H%M%S}_own_list_{Path(own.name).name}"
+            path.write_bytes(own.getbuffer())
+            with st.spinner("Matching your client IDs in the client database…"):
+                try:
+                    ids = read_client_ids(read_file(path))
+                    if not ids:
+                        st.error("No client IDs found in the file.")
+                        return
+                    st.session_state["pulled_list"] = {"key": "custom", "source": own.name, "at": ctx.now(),
+                                                       "df": check_custom_list(ctx, ids)}
+                except Exception as e:
+                    st.error(f"Couldn't check the list: {type(e).__name__}: {str(e)[:300]}")
+                    return
+    got = st.session_state.get("pulled_list")
+    if not got or got["key"] != source:
+        return
+    if "FoundInClientDB" in got["df"]:
+        missing = int((got["df"]["FoundInClientDB"] == 0).sum())
+        st.caption(f"Your list ({got['source']}): {len(got['df']):,} client IDs, {len(got['df']) - missing:,} found in the client database"
+                   + (f", {missing:,} not found (kept in the full download, marked FoundInClientDB = 0)." if missing else "."))
+    everyone = got["df"]
+    flag = everyone["IsCentralized"].fillna(0).astype(int) == 1 if "IsCentralized" in everyone else pd.Series(False, index=everyone.index)
+    central_only = st.checkbox("Centralised clients only (direct clients in a centralised sub-branch: the Vertical rule)", key="pull_central",
+                               value=bool((ctx.cfg.get("sources", {}).get("client_db") or {}).get("centralised_default", True)))
+    df = everyone[flag] if central_only else everyone
+    label = got["source"].replace("{target}", f"{sarthi_target(ctx):,}")
+    c1, c2, c3 = st.columns([1, 1, 3])
+    c1.metric("Clients" + (" (centralised)" if central_only else ""), f"{len(df):,}")
+    c2.metric("Centralised / all", f"{int(flag.sum()):,} / {len(everyone):,}")
+    c3.caption(f"{label} · pulled {got['at']:%d %b %H:%M}. Share these client IDs with the WebEngage team; "
+               "when their event report comes back, upload it below and press Analyse.")
+    if df.empty:
+        st.info("No clients match this list right now.")
+        return
+    stamp = f"{source}_{'centralised_' if central_only else ''}{got['at']:%Y%m%d_%H%M}"
+    d1, d2 = st.columns(2)
+    d1.download_button(f"⬇️ Download {len(df):,} client IDs (CSV)", df[["CLIENT_ID"]].rename(columns={"CLIENT_ID": "Client code"})
+                       .to_csv(index=False).encode("utf-8-sig"), file_name=f"client_ids_{stamp}.csv", mime="text/csv",
+                       type="primary", width="stretch", key="dl_pulled_ids")
+    d2.download_button("Download with registration / deposit / last trade (CSV)", df.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"client_list_{stamp}.csv", mime="text/csv", width="stretch", key="dl_pulled_full")
+    with st.expander(f"Preview (first 20 of {len(df):,})"):
+        st.dataframe(df.head(20), hide_index=True, width="stretch")
+
+
+def history_score_section() -> None:
+    """④ Optional: a score these clients already have from their previous app history, blended into the heat score."""
+    from wepipeline import prior_score
+    from wepipeline.drives import read_file
+
+    w = prior_score.weight(ctx)
+    have = one(ctx.conn, "SELECT COUNT(*) AS n, MAX(uploaded_at) AS last FROM client_scores")
+    with st.expander("④ Optional: add the app-history score for these clients"
+                     + (f" ({have['n']:,} clients have one, last added {fmt(have['last'], '%d %b %H:%M')})" if have["n"] else "")):
+        st.caption(f"A file with a client code column and a score column (0–1, 0–10 or 0–100, or High / Medium / Low). "
+                   f"Each client's heat becomes the stronger of their live app score and this score, plus {w:.0%} of the other, "
+                   "so strong history still ranks a client well in a quiet week. A later file replaces earlier scores for the same clients.")
+        f = st.file_uploader("App-history score file", type=["csv", "xlsx", "xls"], key=f"hist_{st.session_state.get('hist_nonce', 0)}")
+        if f is not None and st.button("Add the scores and re-score", key="add_hist_scores"):
+            folder = ctx.path("data/uploads")
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{ctx.now():%Y%m%d_%H%M%S}_history_score_{Path(f.name).name}"
+            path.write_bytes(f.getbuffer())
+            try:
+                res = prior_score.load(ctx, read_file(path), f.name)
+            except ValueError as e:
+                st.error(str(e))
+                return
+            st.session_state["hist_nonce"] = st.session_state.get("hist_nonce", 0) + 1
+            _customer_rows.clear()
+            t = res["tiers"]
+            st.success(f"{res['saved']:,} scores added from the '{res['score_column']}' column"
+                       + (f" ({res['skipped']:,} rows skipped: no client code or score)" if res["skipped"] else "")
+                       + f". {res['open_clients_matched']:,} are open clients already in the system and were re-scored; the rest "
+                       f"apply when they're uploaded. Open clients now: 🔥 {t['hot']:,} · 🌤️ {t['warm']:,} · ❄️ {t['cold']:,}.")
+
+
 def upload_section() -> None:
-    """SM uploads a list; the system scores, ranks, assigns and pitches it, and shows the results for that list."""
+    """SM uploads a list; the system scores, ranks and pitches it. Assigning it to GMs is a separate button on the results."""
     st.subheader("📤 Analyse a new list")
     with st.container(border=True):
-        list_type = st.radio("① What is this list?", ["no_deposit", "low_margin", "reactivation", "payout"],
-                             format_func=lambda k: LIST_TYPES[k][0],
-                             key="sm_list_type", horizontal=True, index=None)
+        goal_txt = f"₹{sarthi_target(ctx):,}"
+        db_ok = client_db_available(ctx)
+        pull_section(db_ok)
+        st.divider()
+        list_type = st.radio("② What is this list? (sets the scoring rules and the pitch for the analysis)", ["no_deposit", "low_margin", "reactivation", "payout"],
+                             format_func=lambda k: LIST_TYPES[k][0].replace("{target}", goal_txt),
+                             key="sm_list_type", horizontal=True, **({} if "sm_list_type" in st.session_state else {"index": None}))
         if list_type == "low_margin":
-            st.caption("Low margin: clients who deposited less than ₹30k. Add a margin / balance / deposit column to the file "
+            st.caption(f"Low margin: clients who deposited less than ₹{sarthi_target(ctx):,}. Add a margin / balance / deposit column to the file "
                        "and GMs see the exact top-up gap; otherwise the first deposit from the client database is used.")
         if list_type == "payout":
             st.caption("Payout: every customer goes to a GM first in line, with a 30-minute first call. The pitch is retention: "
@@ -786,21 +954,22 @@ def upload_section() -> None:
             st.caption(f"Re-activation: every customer in the file is tagged. Only those whose app activity makes them {tiers} "
                        "go to GMs; the rest wait in a watching pool and are assigned the moment they engage. Cold ones no GM "
                        "has worked yet are taken out of GM queues.")
-        file = st.file_uploader("② Upload the file: a WebEngage event export (one sheet per event, like the 4 Oct file) "
+        file = st.file_uploader("③ Upload the WebEngage event report for these clients (one sheet per event, like the 4 Oct file) "
                                 "or simply a column of client codes", type=["xlsx", "xls", "csv"],
                                 key=f"sm_upload_{st.session_state.get('upload_nonce', 0)}",
                                 disabled=list_type is None)
-        db_ok = client_db_available(ctx)
         use_db = st.checkbox("Look up each client in the client database (registration, deposit, last trade, Sarthi)", value=db_ok,
                              disabled=not db_ok, help="Works from the office network. Elsewhere the list type above sets the pitch.")
+        history_score_section()
         if list_type is None:
             st.caption("Choose what the list is first, then upload it.")
-        if file is not None and st.button("Analyse, score and assign", type="primary"):
+        if file is not None and st.button("Analyse and score", type="primary",
+                                          help="Nobody is assigned yet: check the results below, then press Assign to GMs"):
             folder = ctx.path("data/uploads")
             folder.mkdir(parents=True, exist_ok=True)
             path = folder / f"{ctx.now():%Y%m%d_%H%M%S}_{Path(file.name).name}"
             path.write_bytes(file.getbuffer())
-            with st.spinner("Reading the file, scoring, ranking, assigning to GMs and writing pitches…"):
+            with st.spinner("Reading the file, scoring, ranking and writing pitches…"):
                 result = analyse_upload(ctx, path, uploaded_by=me_id, use_client_db=use_db, list_type=list_type)
             if result.get("error"):
                 st.error(result["error"])
@@ -823,6 +992,24 @@ def upload_section() -> None:
     s = up["summary"]
     data = batch_rows(ctx, up["client_ids"])
     open_rows = [r for r in data if r["status"] == "open"]
+    held = held_count(ctx, up["client_ids"])
+    with st.container(border=True):
+        if held:
+            a, b = st.columns([3, 1])
+            a.warning(f"**{held:,} client(s) from this list are not assigned yet.** Check the scores below, then assign. "
+                      "Hot clients and payouts go first; clients a GM already has stay with them.")
+            if b.button(f"✅ Assign {held:,} to GMs", type="primary", width="stretch", key=f"assign_upload_{up['id']}"):
+                with st.spinner("Assigning to GMs and scheduling first calls…"):
+                    res = assign_upload(ctx, up, assigned_by=me_id)
+                _customer_rows.clear()
+                st.toast(f"Assigned {res['assigned']:,} client(s)"
+                         + (f" · {res['unassigned']:,} waiting for GM capacity" if res["unassigned"] else "")
+                         + (f" · {res['watching_reactivation']:,} re-activation clients watching for engagement"
+                            if res["watching_reactivation"] else ""))
+                st.rerun()
+        else:
+            when = s.get("assigned_at")
+            st.success("✅ This list has been assigned to GMs" + (f" ({fmt(when)})" if when else "") + ".")
     k = st.columns(6)
     k[0].metric("Clients in file", len(data))
     k[1].metric("New to the system", s.get("new_leads", 0))
@@ -856,29 +1043,67 @@ def upload_section() -> None:
 
 def customer_list_page() -> None:
     upload_section()
+    st.caption(f"🤝 Referral drives (most active traders, past referrers) run on the referral dashboard: {REFERRAL_URL} (campaign engagement uploads too)")
+    st.caption(f"⚡ Sarthi activation drives (clients with Sarthi off) run on the Sarthi dashboard: {SARTHI_URL}")
     st.subheader("All customers")
-    st.caption("Every customer with priority, activity, levers and pitch. The same list is published to the Google Sheet "
-               "when one is configured. It refreshes every 5 minutes here.")
-    data = _customer_rows(id(ctx))
+    st.caption("Pick the filters, then **Count customers**: you get the number and a download of their client IDs straight away. "
+               "Open the full details (priority, activity, levers and pitch) only when you need them.")
+    base = pd.DataFrame(rows(ctx.conn, "SELECT lead_id, name, campaign, heat_tier, category, assigned_to, status FROM leads "
+                                       "WHERE COALESCE(campaign,'') NOT IN ('referral','sarthi') AND status<>'drive'"))
+    if base.empty:
+        st.info("No clients yet. Upload a list above to start.")
+        return
+    base = base.assign(List=base["campaign"].fillna("").map(lambda v: LIST_LABELS.get(v, "") or "(none)"),
+                       Priority=base["heat_tier"].map(lambda t: TIER_BADGE.get(t or "cold")),
+                       Category=base["category"].fillna(""),
+                       GM=base["assigned_to"].map(lambda i: (ctx.member(i) or {}).get("name", i) if isinstance(i, str) and i else "Not assigned"),
+                       status=base["status"].fillna(""))
+    with st.form("customer_filters"):
+        c0, c1, c2, c3, c4 = st.columns(5)
+        lst = c0.multiselect("List", sorted(base["List"].unique()))
+        pr = c1.multiselect("Priority", ["🔥 Hot", "🌤️ Warm", "❄️ Cold"])
+        cat = c2.multiselect("Category", sorted(base["Category"].unique()))
+        gm = c3.multiselect("GM", sorted(base["GM"].unique()))
+        statuses = sorted(base["status"].unique())
+        status = c4.multiselect("Client status", statuses, default=["open"] if "open" in statuses else [])
+        if st.form_submit_button("🔎 Count customers", type="primary"):
+            view = base
+            for col, sel in [("List", lst), ("Priority", pr), ("Category", cat), ("GM", gm), ("status", status)]:
+                view = view[view[col].isin(sel)] if sel else view
+            st.session_state["customer_query"] = {"ids": view["lead_id"].tolist(), "filters": {
+                "List": lst, "Priority": pr, "Category": cat, "GM": gm, "Client status": status}}
+            st.session_state.pop("customer_details", None)
+    q = st.session_state.get("customer_query")
+    if not q:
+        st.caption("Nothing counted yet: choose filters (or none for everyone) and press **Count customers**.")
+        return
+    view = base[base["lead_id"].isin(set(q["ids"]))]
+    used = " · ".join(f"{k}: {', '.join(v)}" for k, v in q["filters"].items() if v) or "no filters (everyone)"
+    st.caption(f"Filters: {used}")
+    k = st.columns(4)
+    k[0].metric("Customers", f"{len(view):,}")
+    k[1].metric("🔥 Hot", int((view["heat_tier"] == "hot").sum()))
+    k[2].metric("🌤️ Warm", int((view["heat_tier"] == "warm").sum()))
+    k[3].metric("Not assigned to a GM", int((view["GM"] == "Not assigned").sum()))
+    if view.empty:
+        st.info("No customers match these filters.")
+        return
+    ids_csv = view[["lead_id"]].rename(columns={"lead_id": "Client code"}).to_csv(index=False).encode("utf-8-sig")
+    d1, d2 = st.columns(2)
+    d1.download_button(f"⬇️ Download {len(view):,} client IDs (CSV)", ids_csv, type="primary", width="stretch",
+                       file_name=f"client_ids_{ctx.today().isoformat()}.csv", mime="text/csv")
+    if d2.button("Show full details (priority, levers, pitch)", width="stretch",
+                 help="Builds the call details for these customers only. Takes a few seconds per few hundred customers."):
+        with st.spinner(f"Building details for {len(view):,} customers…"):
+            st.session_state["customer_details"] = build_rows(ctx, lead_ids=view["lead_id"].tolist())
+    data = st.session_state.get("customer_details")
+    if not data:
+        return
     df = pd.DataFrame([{h: r.get(k, "") for h, k in COLUMNS} for r in data])
     for col in ("Rank", "Days since registration", "Days since last trade", "Holdings (₹)"):  # blank for closed leads / clients without a registration date
         df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-    c0, c1, c2, c3, c4 = st.columns(5)
-    lst = c0.multiselect("List", sorted(v for v in df["List"].unique() if v) + ["(none)"])
-    pr = c1.multiselect("Priority", ["🔥 Hot", "🌤️ Warm", "❄️ Cold"])
-    cat = c2.multiselect("Category", sorted(df["Category"].unique()))
-    gm = c3.multiselect("GM", sorted(df["GM"].unique()))
-    status = c4.multiselect("Client status", sorted(df["Client status"].unique()), default=["open"])
-    view = df.assign(List=df["List"].replace("", "(none)"))
-    for col, sel in [("List", lst), ("Priority", pr), ("Category", cat), ("GM", gm), ("Client status", status)]:
-        view = view[view[col].isin(sel)] if sel else view
-    k = st.columns(4)
-    k[0].metric("Customers", len(view))
-    k[1].metric("🔥 Hot", int((view["Priority"] == "🔥 Hot").sum()))
-    k[2].metric("🌤️ Warm", int((view["Priority"] == "🌤️ Warm").sum()))
-    k[3].metric("Waiting for a GM", int((view["GM"] == "Waiting for capacity").sum()))
-    st.dataframe(view, hide_index=True, width="stretch", height=560)
-    st.download_button("Download as CSV (opens in Excel / Google Sheets)", view.to_csv(index=False).encode("utf-8-sig"),
+    st.dataframe(df, hide_index=True, width="stretch", height=560)
+    st.download_button("Download full details as CSV (opens in Excel / Google Sheets)", df.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"customer_priority_{ctx.today().isoformat()}.csv")
     if st.button("Publish to Google Sheet now"):
         with st.spinner("Publishing…"):
@@ -1027,10 +1252,10 @@ def rules_page() -> None:
     r, sla = ctx.rules, current_sla(ctx)
     values = {}
     for k, (label, unit, lo, hi) in RULE_FIELDS.items():
-        step = 0.5 if k == "npc_retry_hours" else 1
-        cast = float if k == "npc_retry_hours" else int
+        step = 0.5 if k in {"npc_retry_hours", "default_followup_hours"} else 1000 if k == "funding_target" else 1
+        cast = float if k in {"npc_retry_hours", "default_followup_hours"} else int
         values[k] = st.number_input(f"{label} ({unit})", min_value=cast(lo), max_value=cast(hi),
-                                    value=cast(r.get(k, lo)), step=cast(step), key=f"rule_{k}")
+                                    value=cast(r.get(k, RULE_DEFAULTS.get(k, lo))), step=cast(step), key=f"rule_{k}")
     st.markdown("**First call for a newly assigned client, by priority (minutes)**")
     cols = st.columns(3)
     new_sla = {t: cols[i].number_input(lbl, min_value=5, max_value=1440, value=int(sla[t]), step=5, key=f"sla_{t}")
@@ -1038,6 +1263,7 @@ def rules_page() -> None:
     if st.button("Save rules", type="primary"):
         try:
             save_rules(ctx, values, new_sla)
+            _customer_rows.clear()
             st.toast("Rules saved.")
             st.rerun()
         except ValueError as e:

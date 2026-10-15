@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, time, timedelta
 
+from .sarthi import target as sarthi_target
 from .context import Ctx, iso, parse_dt
 from .db import one, rows
 from .followups import KIND_LABELS, OUTCOMES
@@ -39,14 +40,20 @@ def compliance(ctx: Ctx, day: date, team_of: str | None = None) -> list[dict]:
     for m in callers:
         fus = rows(ctx.conn, "SELECT * FROM followups WHERE agent_id=? AND due_at>=? AND due_at<? AND status!='cancelled'", (m["id"], lo, hi))
         counts = {"on_time": 0, "late": 0, "missed": 0, "overdue": 0, "upcoming": 0}
-        for f in fus:
-            counts[classify(ctx, f, now)] += 1
-        due = sum(1 for f in fus if parse_dt(f["due_at"], ctx.tz) <= cutoff)
+        due = 0
+        for f in fus:  # a follow-up done early but not yet due counts as upcoming, not as on time
+            if parse_dt(f["due_at"], ctx.tz) <= cutoff:
+                due += 1
+                counts[classify(ctx, f, now)] += 1
+            else:
+                counts["upcoming"] += 1
         calls = rows(ctx.conn, "SELECT c.outcome, c.sarthi_activated, c.deposit_amount, l.extra FROM calls c "
-                               "JOIN leads l ON l.lead_id=c.lead_id WHERE c.agent_id=? AND c.called_at>=? AND c.called_at<?", (m["id"], lo, hi))
-        for c in calls:  # a top-up counts towards the target together with what was already in the account
-            c["deposit_amount"] = (c["deposit_amount"] or 0) and (c["deposit_amount"] + (json.loads(c["extra"] or "{}").get("current_margin") or 0))
-        goal = int(ctx.cfg.get("funding_target") or 0)
+                               "JOIN leads l ON l.lead_id=c.lead_id WHERE c.agent_id=? AND c.called_at>=? AND c.called_at<? "
+                               "AND c.program IS NULL AND COALESCE(l.campaign,'') NOT IN ('referral','sarthi')", (m["id"], lo, hi))
+        goal = sarthi_target(ctx)
+        for c in calls:  # a top-up counts once the client's running balance (which includes it) reaches the target
+            balance = json.loads(c["extra"] or "{}").get("current_margin") or 0
+            c["funded"] = c["outcome"] == "converted" and goal > 0 and max(c["deposit_amount"] or 0, balance) >= goal
         carry = one(ctx.conn, "SELECT COUNT(*) AS n FROM followups f JOIN leads l ON l.lead_id=f.lead_id "
                     "WHERE f.agent_id=? AND f.status='pending' AND l.status='open' AND f.due_at<?", (m["id"], lo))["n"]
         out.append({
@@ -65,7 +72,7 @@ def compliance(ctx: Ctx, day: date, team_of: str | None = None) -> list[dict]:
             "npc": sum(1 for c in calls if c["outcome"] in NPC_OUTCOMES),
             "converted": sum(1 for c in calls if c["outcome"] == "converted"),
             "sarthi_activations": sum(1 for c in calls if c["sarthi_activated"]),
-            "funded_target": sum(1 for c in calls if c["outcome"] == "converted" and (c["deposit_amount"] or 0) >= goal > 0),
+            "funded_target": sum(1 for c in calls if c["funded"]),
             "deposits": round(sum(c["deposit_amount"] or 0 for c in calls if c["outcome"] == "converted")),
         })
     return out
@@ -88,7 +95,7 @@ def misses(ctx: Ctx, day: date, agent_id: str | None = None, team_of: str | None
             continue
         out.append({
             "caller": (ctx.member(f["agent_id"]) or {}).get("name", f["agent_id"]),
-            "lead": f["name"] or f["lead_id"],
+            "client": f["name"] or f["lead_id"],
             "phone": f["phone"],
             "category": f["category"],
             "type": KIND_LABELS.get(f["kind"], f["kind"]),
@@ -135,7 +142,7 @@ def morning_note(ctx: Ctx, member: dict, day: date) -> tuple[str, str]:
             f"**Follow-up compliance on {prev:%a %d %b}**\n"
             + _table(team, ["caller", "due", "on_time", "late", "missed", "compliance_pct", "calls", "converted"])
             + f"\n\n**Misses from {prev:%d %b} ({len(missed_y)})**\n"
-            + _table(missed_y[:20], ["caller", "lead", "type", "due", "state"])
+            + _table(missed_y[:20], ["caller", "client", "type", "due", "state"])
             + f"\n\n**Market notes for the team**\n{market}\n"
         )
         return subject, body
@@ -146,7 +153,7 @@ def morning_note(ctx: Ctx, member: dict, day: date) -> tuple[str, str]:
     new = one(ctx.conn, "SELECT COUNT(*) AS n FROM leads WHERE assigned_to=? AND status='open' AND npc_count=0 AND last_contact_at IS NULL", (member["id"],))["n"]
 
     def item(q):
-        return {"time": parse_dt(q["due_at"], ctx.tz).strftime("%d %b %H:%M"), "lead": q["name"] or q["lead_id"],
+        return {"time": parse_dt(q["due_at"], ctx.tz).strftime("%d %b %H:%M"), "client": q["name"] or q["lead_id"],
                 "phone": q["phone"], "type": KIND_LABELS.get(q["kind"], q["kind"]), "why": q["reason"] or ""}
 
     subject = f"Good morning {first}: your plan for {day:%a %d %b}"
@@ -154,8 +161,8 @@ def morning_note(ctx: Ctx, member: dict, day: date) -> tuple[str, str]:
         f"Good morning {first},\n\nThis is how today is structured:\n{blocks}\n\n"
         f"**Your numbers today:** {len(today_q)} follow-ups scheduled · {len(overdue)} overdue/carry-over · "
         f"{new} clients not yet called\n\n"
-        f"**Clear these first (overdue)**\n" + _table([item(q) for q in overdue[:15]], ["time", "lead", "phone", "type", "why"])
-        + "\n\n**Scheduled today**\n" + _table([item(q) for q in today_q[:25]], ["time", "lead", "phone", "type", "why"])
+        f"**Clear these first (overdue)**\n" + _table([item(q) for q in overdue[:15]], ["time", "client", "phone", "type", "why"])
+        + "\n\n**Scheduled today**\n" + _table([item(q) for q in today_q[:25]], ["time", "client", "phone", "type", "why"])
         + f"\n\n**Market talking points**\n{market}\n\n"
         "Open the dashboard for each client's app activity and pitch. Log every call so your next follow-up is scheduled automatically.\n"
     )
@@ -203,10 +210,10 @@ def eod_report(ctx: Ctx, day: date, member: dict) -> tuple[str, str]:
             f"**Team summary for {day:%a %d %b}**\n"
             f"Due {totals['due']} · on time {totals['on_time']} · late {totals['late']} · **missed {totals['missed']}** · "
             f"still overdue {totals['overdue']} · calls {totals['calls']} · conversions {totals['converted']} · "
-            f"Sarthi activated {totals['sarthi_activations']} · funded ≥ ₹{int(ctx.cfg.get('funding_target') or 0):,}: "
+            f"Sarthi activated {totals['sarthi_activations']} · funded ≥ ₹{sarthi_target(ctx):,}: "
             f"{totals['funded_target']} (₹{totals['deposits']:,} deposited) · on-time rate {pct}\n\n"
             + _table(team, ["caller", "open_leads", "new_leads", "due", "on_time", "late", "missed", "overdue", "carry_over", "compliance_pct", "calls", "connected", "npc", "converted", "sarthi_activations", "funded_target", "deposits"])
-            + f"\n\n**Missed follow-ups ({len(missed)})**\n" + _table(missed, ["caller", "lead", "phone", "type", "due", "state", "completed", "reason"])
+            + f"\n\n**Missed follow-ups ({len(missed)})**\n" + _table(missed, ["caller", "client", "phone", "type", "due", "state", "completed", "reason"])
         )
         return subject, body
 
@@ -216,7 +223,7 @@ def eod_report(ctx: Ctx, day: date, member: dict) -> tuple[str, str]:
     body = (
         f"Due {row['due']} · on time {row['on_time']} · late {row['late']} · **missed {row['missed']}** · "
         f"calls {row['calls']} · conversions {row['converted']}\n\n"
-        f"**Missed follow-ups**\n" + _table(missed, ["lead", "phone", "type", "due", "state", "completed"])
+        f"**Missed follow-ups**\n" + _table(missed, ["client", "phone", "type", "due", "state", "completed"])
         + "\n\nMissed items stay at the top of your queue tomorrow until they are called."
     )
     return subject, body

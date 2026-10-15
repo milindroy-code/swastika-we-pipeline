@@ -75,7 +75,7 @@ def test_pivot_workbook_creates_leads_and_activity(loaded):
     assert acts["ORDER_PLACED_MOB"]["count"] == 3
     assert parse_dt(acts["ORDER_PLACED_MOB"]["last"], TZ) == datetime(2026, 10, 7, 10, 0, tzinfo=TZ)
     # same event on two sheets is kept apart by sheet name
-    assert "RECOMMENDATION_LISTING_OPENED_MOB · fando_research" in acts
+    assert "RECOMMENDATION_LISTING_OPENED_MOB · F&O" in acts
 
 
 def test_core_recent_frequent_activity_scores_highest(loaded):

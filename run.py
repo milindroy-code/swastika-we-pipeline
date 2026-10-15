@@ -22,8 +22,10 @@ from wepipeline.db import open_ctx
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Growth team follow-up pipeline")
-    parser.add_argument("command", choices=["sync", "morning", "eod", "tick", "loop", "pull-clients", "export-sheet", "market", "sarthi", "go-live-reset"])
+    parser.add_argument("command", choices=["sync", "morning", "eod", "tick", "loop", "pull-clients", "export-sheet", "market", "sarthi", "go-live-reset", "referrals", "sarthi-pool"])
     parser.add_argument("--config", help="path to config.yaml")
+    parser.add_argument("--file", help="referrals: the query's output (xlsx/csv) instead of querying the server")
+    parser.add_argument("--force", action="store_true", help="referrals: refresh even if the pool is fresh")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -42,6 +44,21 @@ def main() -> None:
         sync = jobs.sync(ctx)  # score, rebalance and assign first
         print(json.dumps({"rebalanced": sync["rebalanced"], "assigned": sync["assignment"]["assigned"],
                           "reset": go_live_reset(ctx)}, indent=2))
+        return
+    if args.command == "sarthi-pool":  # Sarthi-off target list: activations, traders, app users (when stale or --force)
+        from wepipeline.activation import refresh as refresh_sarthi_pool
+
+        print(json.dumps(refresh_sarthi_pool(ctx, force=args.force), indent=2, default=str))
+        return
+    if args.command == "referrals":
+        from pathlib import Path
+
+        from wepipeline.referral import load_candidates, read_file, refresh
+
+        if args.file:
+            print(json.dumps(load_candidates(ctx, read_file(Path(args.file)), source=Path(args.file).name), indent=2, default=str))
+        else:  # most active traders + referral history, when stale (or --force)
+            print(json.dumps(refresh(ctx, force=args.force), indent=2, default=str))
         return
     if args.command == "sarthi":
         from wepipeline.sarthi import SEGMENTS, pull_track, track_line

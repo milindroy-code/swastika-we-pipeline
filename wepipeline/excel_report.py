@@ -5,6 +5,8 @@ is a COUNTIFS formula over those rows, so the workbook stays correct if someone 
 """
 from __future__ import annotations
 
+import json
+
 from datetime import date, datetime, time, timedelta
 
 from openpyxl import Workbook
@@ -14,6 +16,7 @@ from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from .sarthi import target as sarthi_target
 from .context import Ctx, iso, parse_dt
 from .db import rows
 from .followups import KIND_LABELS, OUTCOMES
@@ -25,7 +28,7 @@ FONT = "Arial"
 GOOD, WARN, SERIOUS, CRIT = "0CA30C", "FAB219", "EC835A", "D03B3B"
 FILLS = {"On time": "DDF3DD", "Late": "FEF0CC", "Overdue": "FBE3D9", "Missed": "F6D8D8", "Upcoming": "EEEEEE"}
 RESULT_LABEL = {"on_time": "On time", "late": "Late", "missed": "Missed", "overdue": "Overdue", "upcoming": "Upcoming"}
-REACHED = {"interested", "connected", "callback_requested", "converted"}
+REACHED = {"interested", "connected", "callback_requested", "converted", "referral_given"}
 NEGATIVE = {"not_interested", "wrong_number"}
 HEAD_FILL = PatternFill("solid", fgColor="1F3A5F")
 THIN = Border(bottom=Side(style="thin", color="DDDDDD"))
@@ -91,8 +94,9 @@ def collect(ctx: Ctx, start: date, end: date) -> tuple[list[dict], list[dict]]:
             "escalated": "Yes" if f["missed"] else "", "notes": f["notes"] or "",
         })
     calls = []
-    for c in rows(ctx.conn, """SELECT c.*, l.name, l.category, l.heat_tier FROM calls c JOIN leads l ON l.lead_id=c.lead_id
-                              WHERE c.called_at>=? AND c.called_at<? ORDER BY c.called_at""", (lo, hi)):
+    for c in rows(ctx.conn, """SELECT c.*, l.name, l.category, l.heat_tier, l.extra FROM calls c JOIN leads l ON l.lead_id=c.lead_id
+                              WHERE c.called_at>=? AND c.called_at<? AND c.program IS NULL AND COALESCE(l.campaign,'') NOT IN ('referral','sarthi')
+                              ORDER BY c.called_at""", (lo, hi)):
         gm = ctx.member(c["agent_id"]) or {}
         calls.append({
             "at": parse_dt(c["called_at"], ctx.tz).replace(tzinfo=None), "gm": gm.get("name", c["agent_id"]),
@@ -101,6 +105,8 @@ def collect(ctx: Ctx, start: date, end: date) -> tuple[list[dict], list[dict]]:
             "result": call_result(c["outcome"]), "notes": c["notes"] or "",
             "sarthi": "Yes" if c.get("sarthi_activated") else "",
             "deposit": c.get("deposit_amount") or None,
+            "funded": "Yes" if c["outcome"] == "converted" and sarthi_target(ctx) > 0 and max(
+                c.get("deposit_amount") or 0, json.loads(c.get("extra") or "{}").get("current_margin") or 0) >= sarthi_target(ctx) else "",
             "next": parse_dt(c["next_followup_at"], ctx.tz).replace(tzinfo=None) if c["next_followup_at"] else None,
         })
     return fus, calls
@@ -133,11 +139,11 @@ def build_workbook(ctx: Ctx, start: date, end: date, title_note: str = "") -> Wo
 
     # ---------------------------------------------------------------- detail: calls
     call_cols = ["Called at", "GM", "Client code", "Name", "Priority", "Category", "Outcome", "Call result", "Notes",
-                 "Next follow-up", "Sarthi activated", "Deposit (₹)"]
-    _header(call_ws, 1, call_cols, [17, 16, 13, 16, 10, 26, 28, 16, 40, 17, 10, 12])
+                 "Next follow-up", "Sarthi activated", "Deposit (₹)", "Funded to target"]
+    _header(call_ws, 1, call_cols, [17, 16, 13, 16, 10, 26, 28, 16, 40, 17, 10, 12, 10])
     for r, c in enumerate(calls, 2):
         _write(call_ws, r, [c["at"], c["gm"], c["client"], c["name"], c["priority"], c["category"], c["outcome"],
-                            c["result"], c["notes"], c["next"], c["sarthi"], c["deposit"]],
+                            c["result"], c["notes"], c["next"], c["sarthi"], c["deposit"], c["funded"]],
                {1: "dd mmm yyyy hh:mm", 10: "dd mmm yyyy hh:mm", 12: "#,##0"})
     n_call = max(len(calls) + 1, 2)
     call_ws.freeze_panes = "B2"
@@ -175,8 +181,8 @@ def build_workbook(ctx: Ctx, start: date, end: date, title_note: str = "") -> Wo
         ("Converted", f"=COUNTIFS({C('H')},\"Converted\")", "0"),
         ("Reach rate", "=IFERROR(B13/B12,0)", "0.0%"),
         ("Sarthi activated on calls", f"=COUNTIFS({C('K')},\"Yes\")", "0"),
-        (f"Funded ≥ ₹{int(ctx.cfg.get('funding_target') or 0):,} (OKR)",
-         f"=COUNTIFS({C('H')},\"Converted\",{C('L')},\">={int(ctx.cfg.get('funding_target') or 0)}\")", "0"),
+        (f"Funded ≥ ₹{sarthi_target(ctx):,} (OKR)",
+         f"=COUNTIFS({C('M')},\"Yes\")", "0"),
         ("Deposits on converted calls (₹)", f"=SUMIFS({C('L')},{C('H')},\"Converted\")", "#,##0"),
     ]
     ws["A4"], ws["B4"] = "Headline", "Value"
@@ -221,7 +227,7 @@ def build_workbook(ctx: Ctx, start: date, end: date, title_note: str = "") -> Wo
         return last + 2
 
     gms = [m["name"] for m in ctx.callers()]
-    nxt = table(18, "By GM (who is following up on time)", "B", gms, "GM")
+    nxt = table(5 + len(kpis) + 1, "By GM (who is following up on time)", "B", gms, "GM")
     nxt = table(nxt, "By follow-up type", "H", list(KIND_LABELS.values()), "Follow-up type")
     nxt = table(nxt, "By priority", "F", list(TIER_BADGE.values()), "Priority")
     cats = sorted({f["category"] for f in fus} | {c["category"] for c in calls})

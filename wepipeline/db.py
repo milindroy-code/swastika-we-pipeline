@@ -252,6 +252,35 @@ CREATE TABLE IF NOT EXISTS uploads (
     summary     TEXT                     -- JSON of the analysis result
 );
 
+-- App activity pulled per client from the WebEngage API (cohorts.py): where each client's fetch has got to.
+CREATE TABLE IF NOT EXISTS we_fetch (
+    client_id  TEXT PRIMARY KEY,
+    we_id      TEXT,
+    fetched_at TEXT,                     -- when we last asked WebEngage
+    fetched_to TEXT,                     -- activity is complete up to this time
+    events     INTEGER NOT NULL DEFAULT 0,
+    error      TEXT
+);
+
+-- Daily cohort lists: pull from the client database, fetch app activity, score, publish as a list (cohorts.py).
+CREATE TABLE IF NOT EXISTS cohort_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    cohort       TEXT NOT NULL,          -- no_deposit | low_margin | payout | reactivation
+    publish      INTEGER NOT NULL DEFAULT 1,  -- 0 = overnight fetch only, 1 = also score and publish the list
+    status       TEXT NOT NULL,          -- queued | running | ready | failed
+    step         TEXT,
+    requested_by TEXT,
+    requested_at TEXT NOT NULL,
+    started_at   TEXT,
+    finished_at  TEXT,
+    total        INTEGER NOT NULL DEFAULT 0,
+    to_fetch     INTEGER NOT NULL DEFAULT 0,
+    fetched      INTEGER NOT NULL DEFAULT 0,
+    no_we_id     INTEGER NOT NULL DEFAULT 0,
+    upload_id    INTEGER,
+    message      TEXT
+);
+
 -- Small editable values shared by the dashboard and the scheduler (e.g. today's market notes).
 CREATE TABLE IF NOT EXISTS settings (
     key        TEXT PRIMARY KEY,

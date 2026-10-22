@@ -1,12 +1,16 @@
-# One-time setup to serve the dashboards to the office network from this PC. Run as ADMINISTRATOR:
+# One-time setup to serve the dashboards to the office network from this machine. Run as ADMINISTRATOR:
 #   Right-click PowerShell > Run as administrator, then:
-#   powershell -ExecutionPolicy Bypass -File "C:\path\to\WE Pipeline\scripts\install_office.ps1"
+#   powershell -ExecutionPolicy Bypass -File "C:\path\to\we-pipeline\scripts\install_office.ps1" [-AtStartup] [-User DOMAIN\account]
 #
 # 1. Opens ports 8501 / 8503 / 8504 in Windows Firewall, only for the office network (-RemoteAddress; default:
-#    this PC's own subnet). VPN users on another range: add it, e.g. -RemoteAddress "LocalSubnet,10.8.0.0/16".
-# 2. Starts the dashboards and the scheduler when -User logs on (scheduled task "Growth dashboards").
+#    this machine's own subnet). VPN users on another range: add it, e.g. -RemoteAddress "LocalSubnet,10.8.0.0/16".
+# 2. Scheduled task "Growth dashboards" that starts the dashboards and the scheduler:
+#    - default: when -User logs on (an office PC someone logs on to)
+#    - -AtStartup: when the machine boots, nobody logged on (a server). Runs as -User without storing a password
+#      (S4U), so it reaches the SQL Server with the SQL login in CLIENT_DB_USER / CLIENT_DB_PASSWORD (set them as
+#      System environment variables), not with Windows authentication.
 # Undo:  Remove-NetFirewallRule -Group "Growth dashboards"; Unregister-ScheduledTask "Growth dashboards" -Confirm:$false
-param([string]$RemoteAddress = "LocalSubnet", [string]$User = "$env:USERDOMAIN\$env:USERNAME")
+param([string]$RemoteAddress = "LocalSubnet", [string]$User = "$env:USERDOMAIN\$env:USERNAME", [switch]$AtStartup)
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -20,10 +24,18 @@ Write-Host "Firewall: ports 8501, 8503, 8504 open to $RemoteAddress (domain / pr
 
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -WorkingDirectory $root `
     -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$root\scripts\start_dashboards.ps1`" -Office"
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
-Register-ScheduledTask -TaskName "Growth dashboards" -Action $action -Trigger $trigger -Settings $settings -User $User -Force | Out-Null
-Write-Host "Scheduled task 'Growth dashboards': starts everything when $User logs on"
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0 `
+    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
+if ($AtStartup) {
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType S4U -RunLevel Limited
+    Register-ScheduledTask -TaskName "Growth dashboards" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    Write-Host "Scheduled task 'Growth dashboards': starts everything at boot, as $User"
+} else {
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
+    Register-ScheduledTask -TaskName "Growth dashboards" -Action $action -Trigger $trigger -Settings $settings -User $User -Force | Out-Null
+    Write-Host "Scheduled task 'Growth dashboards': starts everything when $User logs on"
+}
 Write-Host ""
-Write-Host "Now start them:  powershell -ExecutionPolicy Bypass -File `"$root\scripts\start_dashboards.ps1`" -Office -Restart"
-Write-Host "GMs open:  http://$($env:COMPUTERNAME):8501   Referral: :8503   Sarthi: :8504"
+Write-Host "Start now:  Start-ScheduledTask 'Growth dashboards'   (or: scripts\start_dashboards.ps1 -Office -Restart)"
+Write-Host "Open:       http://$($env:COMPUTERNAME):8501   Referral: :8503   Sarthi: :8504"

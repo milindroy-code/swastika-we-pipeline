@@ -11,7 +11,7 @@
 # A dashboard that is already running is left alone.
 param([switch]$Office, [switch]$Restart)
 Set-Location (Split-Path $PSScriptRoot -Parent)
-foreach ($name in "DATABASE_URL", "CLIENT_DB_USER", "CLIENT_DB_PASSWORD", "CLIENT_DB_CONN", "ADMIN_PIN") {
+foreach ($name in "DATABASE_URL", "CLIENT_DB_USER", "CLIENT_DB_PASSWORD", "CLIENT_DB_CONN", "ADMIN_PIN", "WE_API_KEY") {
     if (-not (Get-Item "env:$name" -ErrorAction SilentlyContinue)) {
         $value = [Environment]::GetEnvironmentVariable($name, "User")
         if ($value) { Set-Item "env:$name" $value }
@@ -47,5 +47,15 @@ if ($Office) {
         Start-Process -FilePath "python" -WindowStyle Hidden -ArgumentList @("run.py", "loop") `
             -RedirectStandardOutput "data\logs\scheduler.out.log" -RedirectStandardError "data\logs\scheduler.log"
         Write-Host "Started the scheduler (log: data\logs\scheduler.log)"
+    }
+    # Daily cohort lists: overnight WebEngage activity fetch, morning scoring (its own process: a fetch takes hours)
+    $worker = Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -match "run\.py\s+cohorts" }
+    if ($worker) {
+        Write-Host "Cohort worker is already running"
+    } else {
+        $env:CLIENT_DB_PULL = "1"
+        Start-Process -FilePath "python" -WindowStyle Hidden -ArgumentList @("run.py", "cohorts") `
+            -RedirectStandardOutput "data\logs\cohorts.out.log" -RedirectStandardError "data\logs\cohorts.log"
+        Write-Host "Started the cohort worker (log: data\logs\cohorts.log)"
     }
 }

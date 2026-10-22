@@ -9,6 +9,8 @@
     python run.py sarthi      # refresh Sarthi's track record from the research database
     python run.py go-live-reset  # start the calling day clean: re-time unworked follow-ups, clear false escalations
     python run.py loop        # run continuously (sync every few minutes, morning note and EOD on schedule)
+    python run.py cohorts     # daily cohort lists: overnight WebEngage activity fetch, morning scoring (runs continuously)
+    python run.py cohorts --now  # queue every cohort list for scoring right away, then keep running
 """
 from __future__ import annotations
 
@@ -22,7 +24,8 @@ from wepipeline.db import open_ctx
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Growth team follow-up pipeline")
-    parser.add_argument("command", choices=["sync", "morning", "eod", "tick", "loop", "pull-clients", "export-sheet", "market", "sarthi", "go-live-reset", "referrals", "sarthi-pool"])
+    parser.add_argument("command", choices=["sync", "morning", "eod", "tick", "loop", "pull-clients", "export-sheet", "market", "sarthi", "go-live-reset", "referrals", "sarthi-pool", "cohorts"])
+    parser.add_argument("--now", action="store_true", help="cohorts: queue every cohort list right away")
     parser.add_argument("--config", help="path to config.yaml")
     parser.add_argument("--file", help="referrals: the query's output (xlsx/csv) instead of querying the server")
     parser.add_argument("--force", action="store_true", help="referrals: refresh even if the pool is fresh")
@@ -32,6 +35,13 @@ def main() -> None:
     ctx = open_ctx(args.config)
     if args.command == "loop":
         jobs.loop(ctx)
+        return
+    if args.command == "cohorts":
+        from wepipeline import cohorts
+
+        if args.now:
+            cohorts.queue(ctx, cohorts.settings(ctx)["cohorts"], publish=True, requested_by="command line")
+        cohorts.worker(ctx)
         return
     if args.command == "pull-clients":
         from wepipeline.clientdb import refresh_from_client_db

@@ -5,7 +5,7 @@ from wepipeline.db import open_ctx
 
 TABLES = ["followups", "calls", "events", "profiles", "activity_summary", "alerts", "notifications",
           "ingested_files", "pitches", "job_runs", "settings", "uploads", "referrals", "referral_outcomes", "drive_campaigns", "drive_asks", "drive_members",
-          "campaign_engagement", "sarthi_activations", "client_scores", "leads"]
+          "campaign_engagement", "sarthi_activations", "client_scores", "we_fetch", "cohort_runs", "leads"]
 
 
 def open_test_ctx(cfg: dict):

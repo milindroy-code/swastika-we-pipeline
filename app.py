@@ -931,10 +931,79 @@ def history_score_section() -> None:
                        f"apply when they're uploaded. Open clients now: 🔥 {t['hot']:,} · 🌤️ {t['warm']:,} · ❄️ {t['cold']:,}.")
 
 
+COHORT_TITLES = {"no_deposit": "New clients without deposit", "low_margin": "New clients with low margin",
+                 "payout": "Clients who made payouts", "reactivation": "Churned clients"}
+
+
+def _upload_label(u: dict) -> str:
+    name = u["filename"].split("_", 2)[-1]
+    if name.startswith("morning_"):  # a list built by the cohort worker
+        name = "📋 " + COHORT_TITLES.get(Path(name).stem.removeprefix("morning_"), name)
+    who = "automatic" if u["uploaded_by"] == "system" else (ctx.member(u["uploaded_by"]) or {}).get("name", u["uploaded_by"] or "")
+    return f"{name} · {u['uploaded_at'][:16].replace('T', ' ')} · {who}"
+
+
+@st.fragment(run_every="30s")
+def todays_lists() -> None:
+    """① + ② in one: each cohort is pulled from the client database, its app activity fetched from WebEngage and scored by
+    the cohort worker (overnight, ready by publish_at). Open a list to see it ranked, download it and assign it."""
+    from wepipeline import cohorts
+
+    s = cohorts.settings(ctx)
+    st.subheader("📋 Today's lists")
+    st.caption(f"Built automatically every morning: client list from the client database → WebEngage ID → 15 days of app "
+               f"activity from WebEngage → heat score. Activity is fetched overnight from {s['fetch_at']}, lists are scored at "
+               f"{s['publish_at']}" + (", centralised clients only." if s["centralised_only"] else ".")
+               + " Nothing goes to a GM until you open the list and press Assign.")
+    runs = cohorts.latest_runs(ctx)
+    cols = st.columns(len(runs))
+    stalled = False
+    for col, (cohort, r) in zip(cols, runs.items()):
+        last, ready = r["last"], r["ready"]
+        title = COHORT_TITLES.get(cohort, cohort).replace("{target}", f"{sarthi_target(ctx):,}")
+        with col.container(border=True):
+            st.markdown(f"**{title}**")
+            if ready:
+                up = one(ctx.conn, "SELECT summary FROM uploads WHERE id=?", (ready["upload_id"],))
+                t = json.loads(up["summary"]).get("tiers", {}) if up else {}
+                st.markdown(f"✅ {ready['total']:,} clients · scored {fmt(ready['finished_at'])}")
+                st.markdown(f"🔥 {t.get('hot', 0):,} · 🌤️ {t.get('warm', 0):,} · ❄️ {t.get('cold', 0):,}")
+                if st.button("Open list", key=f"open_cohort_{cohort}", type="primary", width="stretch"):
+                    st.session_state["upload_view"] = ready["upload_id"]
+                    st.session_state.pop("upload_pick", None)
+                    st.rerun(scope="app")
+            else:
+                st.caption("Not built yet")
+            if last and last["status"] in ("queued", "running"):
+                if last["status"] == "running" and last["to_fetch"]:
+                    st.progress(min(last["fetched"] / last["to_fetch"], 1.0),
+                                text=f"{last['step']}: {last['fetched']:,} / {last['to_fetch']:,}")
+                else:
+                    st.caption(f"⏳ {last['step'] or 'Waiting to start'}")
+                left = max((last["to_fetch"] or 0) - (last["fetched"] or 0), 0)
+                if left:
+                    st.caption(f"About {left * 7 / 3600:.1f} h of fetching left" if left > 500 else f"About {max(left * 7 // 60, 1)} min left")
+                waited = parse_dt(last["requested_at"], ctx.tz)
+                stalled |= last["status"] == "queued" and waited is not None and ctx.now() - waited > timedelta(minutes=10)
+            elif last and last["status"] == "failed":
+                st.error(f"Last run failed: {last['message'] or ''}"[:200])
+            elif last and last["message"]:
+                st.caption(last["message"])
+            busy = bool(last and last["status"] in ("queued", "running"))
+            if st.button("🔄 Rebuild now", key=f"run_cohort_{cohort}", disabled=busy, width="stretch",
+                         help="Queue this list for the cohort worker: pull, fetch app activity for anyone not fetched in the "
+                              f"last {s['fresh_hours']} h, score."):
+                cohorts.queue(ctx, [cohort], publish=True, requested_by=me_id)
+                st.rerun()
+    if stalled:
+        st.warning("Lists have been waiting for over 10 minutes: the cohort worker may not be running. Start it with "
+                   "`scripts\\start_dashboards.ps1 -Office` (or `python run.py cohorts`).")
+
+
 def upload_section() -> None:
     """SM uploads a list; the system scores, ranks and pitches it. Assigning it to GMs is a separate button on the results."""
-    st.subheader("📤 Analyse a new list")
-    with st.container(border=True):
+    todays_lists()
+    with st.expander("📤 Your own list, or a WebEngage report (manual)"):
         goal_txt = f"₹{sarthi_target(ctx):,}"
         db_ok = client_db_available(ctx)
         pull_section(db_ok)
@@ -982,12 +1051,11 @@ def upload_section() -> None:
     uploads = list_uploads(ctx)
     if not uploads:
         return
+    st.subheader("Results")
     ids = [u["id"] for u in uploads]
     default = ids.index(st.session_state["upload_view"]) if st.session_state.get("upload_view") in ids else 0
     pick = st.selectbox("Results for", ids, index=default, key="upload_pick",
-                        format_func=lambda i: next(f"{u['filename'].split('_', 2)[-1]} · {u['uploaded_at'][:16].replace('T', ' ')} · "
-                                                   f"{(ctx.member(u['uploaded_by']) or {}).get('name', u['uploaded_by'] or '')}"
-                                                   for u in uploads if u["id"] == i))
+                        format_func=lambda i: next(_upload_label(u) for u in uploads if u["id"] == i))
     up = next(u for u in uploads if u["id"] == pick)
     s = up["summary"]
     data = batch_rows(ctx, up["client_ids"])

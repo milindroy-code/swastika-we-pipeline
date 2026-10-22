@@ -116,6 +116,14 @@ sources:
     # (new / re-activation / payout) is the List column, chosen when an SM uploads it.
     file_categories: {}
 
+  # WebEngage user-activity API (cohorts.py). The key is the REST API key, read from the WE_API_KEY environment variable
+  # or from secrets/webengage.env (git-ignored). One call at a time, delay_seconds apart, with back-off on errors.
+  webengage_api:
+    host: "https://dashboard.in.webengage.com"
+    account: "in~~991992ab"
+    delay_seconds: 4
+    page_size: 2000
+
 # Map your WebEngage event names to the signals the system understands.
 signals:
   app_open: ["DASHBOARD_OPENED_MOB", "App Opened", "Session Started", "app_open", "App Launched"]
@@ -196,6 +204,22 @@ reactivation:
   assign_tiers: [hot, warm]
   churn_min_days: 90     # "Get the client list" for re-activation: last trade at least this many days ago...
   churn_max_days: 365    # ...and no more than this many
+
+# Daily cohort lists (Customer list > Today's lists), built by `python run.py cohorts` (started by start_dashboards -Office).
+# Each cohort: client-database query -> WebEngage ID (CRM / eKYC) -> app activity from the WebEngage API -> heat score ->
+# a list held for the SM to assign. The API is one call per client, so activity is fetched overnight from fetch_at,
+# in this order, and each list is published at publish_at (anyone not fetched in fresh_hours is topped up first).
+cohorts:
+  enabled: true
+  cohorts: [no_deposit, low_margin, payout, reactivation]
+  centralised_only: true
+  lookback_days: 15        # first fetch for a client: this many days of activity; later fetches continue from the last one
+  fresh_hours: 16          # morning publish: activity fetched within this many hours is not fetched again
+  refetch_after_hours: 4   # overnight fetch: refreshes everyone fetched more than this long before it started
+  fetch_at: "20:00"
+  publish_at: "08:30"
+  publish_on_holidays: false
+  night_only: [reactivation]   # churned clients (~5,000): fetched only overnight; daytime runs score what is already fetched
 
 # Map your sheet's categories to a lifecycle stage so the right playbook is used.
 # Stages: kyc_pending, kyc_no_deposit, funded_no_trade, dormant_trader, active_trader.

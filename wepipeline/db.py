@@ -267,7 +267,7 @@ CREATE TABLE IF NOT EXISTS cohort_runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     cohort       TEXT NOT NULL,          -- no_deposit | low_margin | payout | reactivation
     publish      INTEGER NOT NULL DEFAULT 1,  -- 0 = overnight fetch only, 1 = also score and publish the list
-    status       TEXT NOT NULL,          -- queued | running | ready | failed
+    status       TEXT NOT NULL,          -- queued | running | ready | failed | cancelled
     step         TEXT,
     requested_by TEXT,
     requested_at TEXT NOT NULL,

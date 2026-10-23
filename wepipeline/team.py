@@ -20,8 +20,11 @@ def _slug(name: str, role: str, taken: set[str]) -> str:
     return slug
 
 
-def validate_team(members: list[dict]) -> list[dict]:
-    """Clean and check the edited table. Raises ValueError with a message the admin can act on."""
+def validate_team(members: list[dict], notes: list[str] | None = None) -> list[dict]:
+    """Clean and check the edited table. Raises ValueError with a message the admin can act on.
+    A GM whose SM is blank or no longer in the team (the editor only offers SMs saved before, so a new SM can't be
+    picked yet) goes to the only SM, or with several SMs to the first one, with a note to set the right one."""
+    notes = notes if notes is not None else []
     clean, taken = [], set()
     for m in members:
         name = str(m.get("name") or "").strip()
@@ -53,13 +56,16 @@ def validate_team(members: list[dict]) -> list[dict]:
         clean.append(entry)
     if not any(m["role"] == "sm" for m in clean):
         raise ValueError("Add at least one SM")
-    sms = {m["id"] for m in clean if m["role"] == "sm"}
-    sm_names = {m["name"].lower(): m["id"] for m in clean if m["role"] == "sm"}
+    sm_list = [m for m in clean if m["role"] == "sm"]
+    sms = {m["id"] for m in sm_list}
+    sm_names = {m["name"].lower(): m["id"] for m in sm_list}
     for m in clean:
         if m["role"] == "gm":
             m["sm"] = sm_names.get(m["sm"].lower(), m["sm"])  # the editor may hold the SM's name
             if m["sm"] not in sms:
-                raise ValueError(f"{m['name']}: reports to an SM who isn't in the team")
+                m["sm"] = sm_list[0]["id"]
+                if len(sm_list) > 1:
+                    notes.append(f"{m['name']} now reports to {sm_list[0]['name']}: pick their SM in 'Reports to (SM)' and save again")
     if not any(m["role"] == "sm" for m in clean):
         raise ValueError("Add at least one SM")
     if not any(m["role"] == "gm" and m["active"] for m in clean):
@@ -73,7 +79,8 @@ def save_team(ctx: Ctx, members: list[dict]) -> dict:
     from .assign import open_load, pick_caller
     from .followups import reassign_lead
 
-    clean = validate_team(members)
+    notes: list[str] = []
+    clean = validate_team(members, notes)
     set_setting(ctx.conn, "team", json.dumps(clean), iso(ctx.now()))
     ctx.clear_rules_cache()
     active = {m["id"] for m in clean if m["role"] == "gm" and m["active"]}
@@ -94,7 +101,7 @@ def save_team(ctx: Ctx, members: list[dict]) -> dict:
                              "WHERE lead_id=? AND status='pending'", (lead["lead_id"],))
             released += 1
     ctx.conn.commit()
-    return {"members": len(clean), "gms": len(active), "leads_moved": moved, "leads_back_to_pool": released}
+    return {"members": len(clean), "gms": len(active), "leads_moved": moved, "leads_back_to_pool": released, "notes": notes}
 
 
 def validate_routine(blocks: list[dict]) -> list[dict]:

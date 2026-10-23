@@ -32,9 +32,20 @@ REAL_TEAM = [
 ]
 
 
+def test_a_new_sm_replacing_the_dummy_never_blocks_the_save():
+    # the dummy SM is renamed to the real one; the GMs still say "SM 01 (dummy)" (the dropdown lists saved SMs only)
+    notes = []
+    team = validate_team([{"id": "1", "name": "Para", "role": "SM"},
+                          {"id": "2", "name": "Gaurav Ajmery", "role": "GM", "sm": "SM 01 (dummy)", "capacity": 20},
+                          {"id": "3", "name": "Poonam", "role": "GM", "sm": "", "capacity": 20}], notes)
+    assert [m["sm"] for m in team if m["role"] == "gm"] == ["1", "1"] and notes == []  # the only SM: no question to ask
+    team = validate_team([{"name": "Para", "role": "SM"}, {"name": "Ravi", "role": "SM"},
+                          {"name": "Gaurav", "role": "GM", "sm": "SM 01 (dummy)"}, {"name": "Poonam", "role": "GM", "sm": "Ravi"}], notes)
+    assert [m["sm"] for m in team if m["role"] == "gm"] == ["sm_para", "sm_ravi"]
+    assert notes == ["Gaurav now reports to Para: pick their SM in 'Reports to (SM)' and save again"]
+
+
 def test_validation_messages():
-    with pytest.raises(ValueError, match="reports to an SM who isn't in the team"):
-        validate_team([{"name": "A", "role": "SM"}, {"name": "B", "role": "GM", "sm": "Nobody"}])
     with pytest.raises(ValueError, match="Add at least one SM"):
         validate_team([{"name": "B", "role": "GM"}])
     with pytest.raises(ValueError, match="capacity must be between"):
@@ -50,7 +61,7 @@ def test_replacing_dummy_gms_moves_their_leads_with_followups(ctx):
                          "VALUES (?,?,?,?,?,?,?,?)", (f"L{i}", f"L{i}", "open", "x", "s", "{}", gm, 50 - i))
         add_followup(ctx, f"L{i}", gm, NOW.replace(hour=15), "promised", "promised a call at 3")
     res = save_team(ctx, REAL_TEAM)
-    assert res == {"members": 3, "gms": 2, "leads_moved": 3, "leads_back_to_pool": 0}
+    assert res == {"members": 3, "gms": 2, "leads_moved": 3, "leads_back_to_pool": 0, "notes": []}
     assert {m["id"] for m in ctx.callers()} == {"gm_rahul_verma", "gm_kiran_shah"}
     owners = {r["assigned_to"] for r in rows(ctx.conn, "SELECT assigned_to FROM leads")}
     assert owners <= {"gm_rahul_verma", "gm_kiran_shah"}

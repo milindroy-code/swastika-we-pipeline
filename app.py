@@ -972,6 +972,8 @@ def todays_lists() -> None:
                     st.session_state["upload_view"] = ready["upload_id"]
                     st.session_state.pop("upload_pick", None)
                     st.rerun(scope="app")
+            elif cohort in s["night_only"]:
+                st.caption(f"🌙 Fetched overnight from {s['fetch_at']}; the list is ready at {s['publish_at']} on the next working day")
             else:
                 st.caption("Not built yet")
             if last and last["status"] in ("queued", "running"):
@@ -987,6 +989,8 @@ def todays_lists() -> None:
                 stalled |= last["status"] == "queued" and waited is not None and ctx.now() - waited > timedelta(minutes=10)
             elif last and last["status"] == "failed":
                 st.error(f"Last run failed: {last['message'] or ''}"[:200])
+            elif last and last["status"] == "cancelled":
+                pass  # superseded or moved to the overnight run: nothing to act on
             elif last and last["message"]:
                 st.caption(last["message"])
             busy = bool(last and last["status"] in ("queued", "running"))
@@ -1211,10 +1215,16 @@ def team_editor() -> None:
             "ID": st.column_config.TextColumn(help="Leave blank for a new person; it's generated from the name"),
             "Role": st.column_config.SelectboxColumn(options=["GM", "SM"], required=True),
             "Reports to (SM)": st.column_config.SelectboxColumn(options=[m["name"] for m in sms] + [""],
-                                                                help="GMs only. Add the SM first, save, then pick them here"),
+                                                                help="GMs only. A new SM appears here once saved: until then "
+                                                                     "their GMs are saved under the first SM"),
             "Capacity (open clients)": st.column_config.NumberColumn(min_value=1, max_value=1000, step=5),
             "Active": st.column_config.CheckboxColumn(default=True),
         })
+    saved = st.session_state.pop("team_saved", None)
+    if saved:
+        st.success(saved[0])
+        for note in saved[1]:
+            st.warning(note)
     if st.button("Save team", type="primary"):
         try:
             res = save_team(ctx, [{"id": r["ID"], "name": r["Name"], "role": r["Role"], "sm": r["Reports to (SM)"],
@@ -1224,8 +1234,11 @@ def team_editor() -> None:
                                   for r in edited.fillna("").to_dict("records")])
             jobs.sync(ctx)  # hand out leads to new capacity straight away
             _customer_rows.clear()
-            st.success(f"Saved: {res['members']} people, {res['gms']} active GMs. {res['leads_moved']} clients moved to other GMs"
-                       + (f", {res['leads_back_to_pool']} back to the pool" if res["leads_back_to_pool"] else "") + ".")
+            st.session_state["team_saved"] = (
+                f"Saved: {res['members']} people, {res['gms']} active GMs. {res['leads_moved']} clients moved to other GMs"
+                + (f", {res['leads_back_to_pool']} back to the pool" if res["leads_back_to_pool"] else "") + ".", res["notes"])
+            st.session_state.pop("team_editor", None)  # redraw from the saved team, with any new SM in 'Reports to'
+            st.rerun()
         except ValueError as e:
             st.error(str(e))
 

@@ -36,6 +36,52 @@ def _send_email(ctx: Ctx, to: str, subject: str, body: str) -> bool:
         return False
 
 
+def _load_mail_env(ctx: Ctx) -> None:
+    """SMTP_USER / SMTP_PASSWORD from the environment, or from secrets/email.env (git-ignored)."""
+    path = ctx.path("secrets/email.env")
+    if os.environ.get("SMTP_PASSWORD") or not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        k, sep, v = line.strip().partition("=")
+        if sep and not k.startswith("#") and v.strip():
+            os.environ.setdefault(k.strip(), v.strip())
+
+
+def send_mail(ctx: Ctx, to: list[str], subject: str, body: str, cc: list[str] | None = None,
+              attachments: list[tuple[str, bytes]] | None = None) -> bool:
+    """One email to named people (e.g. the daily lists report), through the SMTP server in notifications.email.
+    Works whether or not per-person notification emails are switched on. False (and logged) if it can't be sent."""
+    _load_mail_env(ctx)
+    cfg = ctx.cfg.get("notifications", {}).get("email", {})
+    user = cfg.get("username") or os.environ.get("SMTP_USER", "")
+    password = os.environ.get(cfg.get("password_env", "SMTP_PASSWORD"), "")
+    login = cfg.get("smtp_auth", True)  # False for an IP-allowlisted relay (Google Workspace SMTP relay): no password at all
+    sender = cfg.get("from_address") or user
+    if not to or not sender or (login and not (user and password)):
+        log.warning("Email '%s' not sent: set SMTP_USER / SMTP_PASSWORD (secrets/email.env), or a relay with from_address", subject)
+        return False
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = ", ".join(to)
+    if cc:
+        msg["Cc"] = ", ".join(cc)
+    msg["Subject"] = subject
+    msg.set_content(body)
+    for name, data in attachments or []:
+        msg.add_attachment(data, maintype="application", subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           filename=name)
+    try:
+        with smtplib.SMTP(cfg.get("smtp_host", "smtp.gmail.com"), int(cfg.get("smtp_port", 587)), timeout=60) as smtp:
+            smtp.starttls()
+            if login:
+                smtp.login(user, password)
+            smtp.send_message(msg)
+        return True
+    except (smtplib.SMTPException, OSError) as e:
+        log.warning("Email '%s' failed: %s", subject, e)
+        return False
+
+
 def _send_webhook(ctx: Ctx, text: str) -> bool:
     url = ctx.cfg.get("notifications", {}).get("webhook_url")
     if not url:

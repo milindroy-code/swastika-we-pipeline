@@ -537,6 +537,64 @@ def _clear_card(lid: str | None) -> None:
         st.session_state.pop(f"{k}_{lid}", None)
 
 
+def gm_numbers_section() -> None:
+    """SM: the day's plan for their GMs: which cohorts in which calling order, which priority, how many per GM."""
+    from wepipeline.assign import (PLAN_LISTS, PLAN_TIERS, assigned_today, assignment_mode, day_plan, open_load, set_day_plans,
+                                   waiting_for_plan)
+
+    if assignment_mode(ctx) == "auto":
+        st.caption("🔀 Assignment is automatic (set by the admin): every GM is filled up to capacity, hottest first. "
+                   "Your plan is kept for when SM planning is switched back on.")
+        return
+    mine = [g for g in ctx.callers() if ctx.sm_of(g) == me_id] or ctx.callers()
+    if not mine:
+        return
+    taken, load, waiting = assigned_today(ctx), open_load(ctx), waiting_for_plan(ctx)
+    plans = {g["id"]: day_plan(ctx, g["id"]) for g in mine}
+    first = plans[mine[0]["id"]]  # one plan for the SM's team: shown from the first GM's
+    saved = any(p["saved"] for p in plans.values())
+    title = ("🎯 Today's plan · " + " → ".join(PLAN_LISTS[l] for l in first["lists"]) + " · "
+             + " ".join(PLAN_TIERS[t].split()[0] for t in first["tiers"]) + f" · {sum(taken.get(g['id'], 0) for g in mine):,} given today"
+             if saved and first["lists"] else "🎯 Today's plan · not set: your GMs get no new clients until you save one")
+    with st.expander(title, expanded=not saved):
+        count = lambda k, tiers=None: sum(v for (l, t), v in waiting.items() if l == k and (tiers is None or t in tiers))  # noqa: E731
+        st.markdown("**1. Which cohorts, in calling order**")
+        lists = st.multiselect("Cohorts", list(PLAN_LISTS), default=first["lists"], key="plan_lists", label_visibility="collapsed",
+                               format_func=lambda k: f"{PLAN_LISTS[k]} ({count(k):,} waiting)",
+                               placeholder="Pick the cohort to call first, then the next…")
+        if lists:
+            st.caption("Calling order: " + " → ".join(f"{i}. {PLAN_LISTS[k]}" for i, k in enumerate(lists, 1))
+                       + ". To change the order, remove a cohort and add it again.")
+        st.markdown("**2. Which clients**")
+        tiers = st.pills("Priority", list(PLAN_TIERS), selection_mode="multi", default=first["tiers"], key="plan_tiers",
+                         label_visibility="collapsed",
+                         format_func=lambda k: f"{PLAN_TIERS[k]} ({sum(v for (l, t), v in waiting.items() if t == k and l in lists):,})")
+        match = sum(count(k, tiers or []) for k in lists)
+        st.caption(f"{match:,} clients from today's lists match (not yet with a GM). Saving the plan assigns them: no separate "
+                   "Assign needed. They go out in your order, first cohort first, 🔥 before 🌤️ before ❄️ inside each, and GMs "
+                   "call them in the same order. Churned clients go out once warm or hot.")
+        st.markdown("**3. How many new clients for each GM today**")
+        df = pd.DataFrame([{"GM": g["name"], "New clients today": plans[g["id"]]["new_clients"], "Given today": taken.get(g["id"], 0),
+                            "Open / capacity": f"{load.get(g['id'], 0):,} / {g.get('capacity', 50):,}"} for g in mine])
+        edited = st.data_editor(df, hide_index=True, width="stretch", key="gm_plans_editor",
+                                disabled=["GM", "Given today", "Open / capacity"],
+                                column_config={"New clients today": st.column_config.NumberColumn(
+                                    min_value=0, max_value=500, step=5, help="Blank = up to their capacity")})
+        if st.button("✅ Save plan and assign", type="primary", key="save_gm_plans", disabled=not (lists and tiers)):
+            new = {}
+            for g, n in zip(mine, edited["New clients today"]):
+                new[g["id"]] = {"new_clients": None if n is None or pd.isna(n) else int(n), "lists": list(lists), "tiers": list(tiers)}
+            try:
+                res = set_day_plans(ctx, new)
+            except Exception as e:
+                st.error(f"Couldn't save ({type(e).__name__}: {str(e)[:120]}). Try again in a minute.")
+                return
+            st.toast(f"Plan saved. {res['assigned']:,} new client(s) handed out.")
+            st.session_state.pop("gm_plans_editor", None)
+            st.rerun()
+        st.caption("The plan carries over to the next day until you change it.")
+
+
 def dialer(agent_id: str) -> None:
     urgency_strip(agent_id)
     queue = dialer_queue(ctx, agent_id)
@@ -615,6 +673,7 @@ def caller_leads(agent_id: str) -> None:
 
 # ---------------------------------------------------------------- manager pieces
 def team_compliance() -> None:
+    gm_numbers_section()
     c1, c2 = st.columns([1, 2])
     day = c1.date_input("Day", ctx.today())
     scope = c2.radio("Team", ["My team", "Everyone"], horizontal=True)
@@ -1198,6 +1257,96 @@ def time_limits_md() -> str:
     )
 
 
+def assignment_mode_section() -> None:
+    """Admin: SM-planned assignment, or automatic once the process is streamlined."""
+    from wepipeline.assign import MODES, assignment_mode, set_assignment_mode
+
+    st.subheader("🔀 How new clients are assigned")
+    mode = assignment_mode(ctx)
+    pick = st.radio("Assignment mode", list(MODES), index=list(MODES).index(mode), horizontal=True, key="assign_mode",
+                    format_func=MODES.get, label_visibility="collapsed")
+    st.caption("**SM plans each GM's day:** each SM sets, per GM, how many new clients, which lists and which priority "
+               "(Team compliance → Assignment plan for today). A GM gets no new clients until their SM has saved a plan.  \n"
+               "**Automatic:** every GM is filled up to their capacity, hottest first, from every list. SM plans are kept "
+               "for when you switch back.  \nPayouts released with Assign always go to someone straight away.")
+    if pick != mode and st.button(f"Switch to: {MODES[pick]}", type="primary", key="assign_mode_save"):
+        try:
+            res = set_assignment_mode(ctx, pick)
+        except Exception as e:
+            st.error(f"Couldn't switch ({type(e).__name__}: {str(e)[:120]}). Try again in a minute.")
+            return
+        _customer_rows.clear()
+        st.toast(f"Assignment is now: {MODES[pick]}." + (f" {res['assigned']:,} client(s) handed out." if res["assigned"] else ""))
+        st.rerun()
+
+
+def take_back_section() -> None:
+    """Admin: take back the clients a GM hasn't called yet, overdue or not."""
+    from wepipeline.assign import take_back_unworked, unworked_counts
+
+    counts = unworked_counts(ctx)
+    gms = [g for g in ctx.callers() if counts.get(g["id"])]
+    st.markdown("**Take back clients not called yet**")
+    if not gms:
+        st.caption("Every GM has called all the clients they hold.")
+        return
+    st.caption("Clients a GM holds but hasn't called (first call not made yet, due or not). They go back on hold in their "
+               "list: nobody gets them until an SM plans or assigns them again. Clients a GM has called stay with them.")
+    st.markdown(" · ".join(f"{g['name']}: **{counts[g['id']]:,}** not called yet" for g in gms))
+    pick = st.multiselect("GMs", [g["id"] for g in gms], default=[g["id"] for g in gms], format_func=lambda i: ctx.member(i)["name"],
+                          key="take_back_gms")
+    sure = st.checkbox(f"Yes, take back {sum(counts[i] for i in pick):,} client(s)", key="take_back_sure")
+    if st.button("↩️ Take back", type="primary", disabled=not (pick and sure), key="take_back_btn"):
+        try:
+            res = take_back_unworked(ctx, pick)
+        except Exception as e:
+            st.error(f"Couldn't take them back right now ({type(e).__name__}: {str(e)[:120]}). Nothing was changed: try again.")
+            return
+        _customer_rows.clear()
+        st.session_state["overdue_cleared"] = f"Done: {res['taken_back']:,} client(s) taken back and put on hold."
+        st.session_state.pop("take_back_sure", None)
+        st.rerun()
+
+
+def clear_overdue_section() -> None:
+    """Admin: wipe the overdue backlog so GMs start fresh (re-timed, not deleted)."""
+    from wepipeline.assign import clear_overdue, overdue_counts
+
+    st.subheader("🧹 Start fresh: take back or clear")
+    st.caption("Every overdue follow-up is cleared, with its warnings and escalations. Nobody is re-assigned: never-called "
+               "clients go back to their list on hold (assign them again from Customer list if you want), clients a GM has "
+               "already called stay with that GM. Call history is never touched. New clients then come in through each "
+               "GM's plan for the day.")
+    done = st.session_state.pop("overdue_cleared", None)
+    if done:
+        st.success(done)
+    take_back_section()
+    counts = overdue_counts(ctx)
+    gms = [g for g in ctx.callers() if counts.get(g["id"])]
+    st.markdown("**Clear overdue follow-ups**")
+    if not gms:
+        st.caption("No GM has overdue follow-ups right now.")
+        return
+    st.markdown(" · ".join(f"{g['name']}: **{counts[g['id']]}** overdue" for g in gms))
+    pick = st.multiselect("GMs", [g["id"] for g in gms], default=[g["id"] for g in gms], format_func=lambda i: ctx.member(i)["name"],
+                          key="clear_overdue_gms")
+    sure = st.checkbox(f"Yes, clear {sum(counts[i] for i in pick):,} overdue follow-up(s)", key="clear_overdue_sure")
+    if st.button("🧹 Clear overdue", type="primary", disabled=not (pick and sure)):
+        try:
+            with st.spinner("Clearing…"):
+                res = clear_overdue(ctx, pick)
+        except Exception as e:  # e.g. the database stayed busy for a minute
+            st.error(f"Couldn't clear right now ({type(e).__name__}: {str(e)[:120]}). Nothing was changed: try again in a minute.")
+            return
+        _customer_rows.clear()
+        st.session_state["overdue_cleared"] = (
+            f"Done: {res['cleared']:,} overdue follow-up(s) cleared, {res['alerts_cleared']:,} warning(s) / escalation(s) removed. "
+            f"{res['back_on_hold']:,} never-called client(s) back on hold in their list; {res['kept']:,} worked client(s) stay "
+            "with their GM.")
+        st.session_state.pop("clear_overdue_sure", None)
+        st.rerun()
+
+
 def team_editor() -> None:
     st.subheader("👥 Team: GMs and SMs")
     st.caption("Add your real Growth Managers and Service Managers, set who reports to whom and how many open clients each GM "
@@ -1349,6 +1498,10 @@ def rules_page() -> None:
             st.rerun()
         except ValueError as e:
             st.error(str(e))
+    st.divider()
+    assignment_mode_section()
+    st.divider()
+    clear_overdue_section()
     st.divider()
     team_editor()
     st.divider()

@@ -262,6 +262,23 @@ CREATE TABLE IF NOT EXISTS we_fetch (
     error      TEXT
 );
 
+-- Each GM's plan for the day (assign.py): how many new clients, from which lists, of which priority.
+CREATE TABLE IF NOT EXISTS gm_plans (
+    gm_id      TEXT NOT NULL,
+    day        TEXT NOT NULL,
+    plan       TEXT NOT NULL,            -- JSON {"new_clients": int, "lists": [...], "tiers": [...]}
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (gm_id, day)
+);
+
+-- Client code -> WebEngage ID (CRM lead -> eKYC). IDs don't change, so each client is looked up once; we_id is NULL
+-- when the CRM has none (looked up again after a few days, in case it appears).
+CREATE TABLE IF NOT EXISTS we_ids (
+    client_id    TEXT PRIMARY KEY,
+    we_id        TEXT,
+    looked_up_at TEXT NOT NULL
+);
+
 -- Daily cohort lists: pull from the client database, fetch app activity, score, publish as a list (cohorts.py).
 CREATE TABLE IF NOT EXISTS cohort_runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -293,7 +310,8 @@ CREATE TABLE IF NOT EXISTS settings (
 LATER_COLUMNS = {
     "leads": {"heat_score": "REAL NOT NULL DEFAULT 0", "heat_tier": "TEXT NOT NULL DEFAULT 'cold'", "heat_reasons": "TEXT",
               "campaign": "TEXT NOT NULL DEFAULT ''",  # list the lead belongs to, e.g. 'reactivation'
-              "on_hold": "INTEGER NOT NULL DEFAULT 0"},  # 1 = in an uploaded list the SM has not assigned yet
+              "on_hold": "INTEGER NOT NULL DEFAULT 0",  # 1 = in an uploaded list the SM has not assigned yet
+              "released_at": "TEXT"},  # when an SM pressed Assign on a list holding this client
     "drive_members": {"segment": "TEXT"},
     "referral_outcomes": {"last_trade": "TEXT"},  # client type in a drive: new / active / resurrected
     "calls": {"sarthi_activated": "INTEGER NOT NULL DEFAULT 0", "deposit_amount": "REAL",
@@ -455,3 +473,19 @@ def set_setting(conn, key: str, value: str, now: str) -> None:
     conn.execute("INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
                  "ON CONFLICT (key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", (key, value, now))
     conn.commit()
+
+
+def write_retrying(conn, fn, tries: int = 6, wait: float = 10.0):
+    """Run a write (fn does its statements and commits). SQLite allows one writer at a time, and the scheduler's or the
+    cohort worker's re-score can hold the database for longer than the 30 s busy timeout: roll back (a failed write leaves
+    its transaction open, blocking every later write) and try again."""
+    import time
+
+    for attempt in range(tries):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            conn.rollback()
+            if "locked" not in str(e) or attempt == tries - 1:
+                raise
+            time.sleep(wait)

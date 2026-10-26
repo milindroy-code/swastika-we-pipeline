@@ -152,14 +152,15 @@ def test_a_failing_fetch_is_recorded_and_the_run_goes_on(ctx, monkeypatch):
     assert cohorts.needs_fetch(ctx, ["A1", "B1"]) == ["A1"]  # retried next time
 
 
-def test_churned_clients_are_only_fetched_overnight(ctx, monkeypatch):
+def test_churned_clients_wait_while_other_lists_are_building(ctx, monkeypatch):
     df = pd.DataFrame({"CLIENT_ID": ["R1"], "IsCentralized": [1]})
     monkeypatch.setattr(cohorts, "pull_cohort", lambda c, k: df)
     monkeypatch.setattr(cohorts, "lookup_we_ids", lambda c, ids: {"R1": "WR"})
     api = FakeApi({"WR": [ev("ORDER_PLACED_MOB", 1)]})
-    cohorts.queue(ctx, ["reactivation"], publish=True)  # "Rebuild now" in the day: scored, nothing fetched
+    cohorts.queue(ctx, ["reactivation", "no_deposit"], publish=True)  # another list still to build: churned only scored
     cohorts.work_once(ctx, api)
-    assert api.calls == [] and one(ctx.conn, "SELECT status FROM cohort_runs")["status"] == "ready"
+    assert api.calls == [] and one(ctx.conn, "SELECT status FROM cohort_runs WHERE cohort='reactivation'")["status"] == "ready"
+    ctx.conn.execute("UPDATE cohort_runs SET status='cancelled' WHERE cohort='no_deposit'")
     cohorts.queue(ctx, ["reactivation"], publish=False)  # the overnight run fetches
     cohorts.work_once(ctx, api)
     assert [c[0] for c in api.calls] == ["WR"]
@@ -179,3 +180,81 @@ def test_a_locked_database_is_retried_not_fatal(ctx, monkeypatch):
 
     monkeypatch.setattr(cohorts, "_save_fetch", flaky)
     assert cohorts.fetch_client(ctx, FakeApi({"W1": [ev("ORDER_PLACED_MOB", 1)]}), "C1", "W1") == 1
+
+
+def test_webengage_ids_are_looked_up_once_and_missing_ones_rechecked(ctx, monkeypatch):
+    asked = []
+
+    def fake_query(c, chunk, tries=3):
+        asked.append(list(chunk))
+        return {"A1": "WA"}
+
+    monkeypatch.setattr(cohorts, "_query_we_ids", fake_query)
+    assert cohorts.lookup_we_ids(ctx, ["A1", "B1"]) == {"A1": "WA"}
+    assert cohorts.lookup_we_ids(ctx, ["A1", "B1", "C1"]) == {"A1": "WA"}
+    assert asked == [["A1", "B1"], ["C1"]]  # saved IDs (and recent misses) are not asked for again
+    ctx._now = NOW + timedelta(days=cohorts.MISSING_RECHECK_DAYS + 1)
+    cohorts.lookup_we_ids(ctx, ["A1", "B1"])
+    assert asked[-1] == ["B1"]  # a client without an ID is checked again after a few days
+
+
+def test_the_api_is_capped_per_minute_and_brakes_when_pushed_back(ctx, monkeypatch):
+    import threading
+
+    api = cohorts.Api.__new__(cohorts.Api)
+    api.s = {"max_per_minute": 30, "max_slowdown": 8}
+    api._next, api.calls, api.slowdown, api._lock = 0.0, 0, 1.0, threading.Lock()
+    waits = []
+    api.sleep = waits.append
+    clock = [1000.0]
+    monkeypatch.setattr(cohorts.time, "monotonic", lambda: clock[0])
+    for _ in range(4):
+        api._wait_turn()
+    assert waits == [2.0, 4.0, 6.0]  # 30 a minute: one start every 2 s, however many lanes ask at once
+    api._brake()
+    api._brake()
+    assert api._interval() == 8.0  # two push-backs: four times slower
+    for _ in range(3):
+        api._brake()
+    assert api._interval() == 16.0  # never more than max_slowdown times slower
+
+
+def test_parallel_lanes_fetch_every_client_once(ctx, monkeypatch):
+    df = pd.DataFrame({"CLIENT_ID": [f"C{i}" for i in range(7)], "IsCentralized": [1] * 7})
+    monkeypatch.setattr(cohorts, "pull_cohort", lambda c, k: df)
+    monkeypatch.setattr(cohorts, "lookup_we_ids", lambda c, ids: {f"C{i}": f"W{i}" for i in range(7)})
+    api = FakeApi({f"W{i}": [ev("ORDER_PLACED_MOB", i + 1)] for i in range(7)})
+    api.s = {"lanes": 3, "page_size": 2000}
+    cohorts.queue(ctx, ["no_deposit"], publish=False)
+    cohorts.work_once(ctx, api)
+    assert sorted(c[0] for c in api.calls) == sorted(f"W{i}" for i in range(7))
+    assert one(ctx.conn, "SELECT fetched, status FROM cohort_runs")["fetched"] == 7
+    assert one(ctx.conn, "SELECT COUNT(*) n FROM events")["n"] == 7
+
+
+def test_churned_fetches_once_the_other_lists_are_done_and_emails_go_out(ctx, monkeypatch):
+    import wepipeline.notify as notify
+
+    mails = []
+    monkeypatch.setattr(notify, "send_mail", lambda c, to, subject, body, cc=None, attachments=None:
+                        mails.append((to, cc, subject, [a[0] for a in attachments or []])) or True)
+    ctx.cfg["cohorts"] = {**ctx.cfg.get("cohorts", {}), "report": {"enabled": True, "to": ["me@x.in"], "cc": ["boss@x.in"]}}
+    lists = {"no_deposit": ["N1"], "low_margin": ["L1"], "payout": ["P1"], "reactivation": ["R1"]}
+    monkeypatch.setattr(cohorts, "pull_cohort", lambda c, k: pd.DataFrame({"CLIENT_ID": lists[k], "IsCentralized": [1]}))
+    monkeypatch.setattr(cohorts, "lookup_we_ids", lambda c, ids: {i: "W" + i for i in ids})
+    api = FakeApi({"W" + i[0]: [ev("ORDER_PLACED_MOB", 1)] for i in lists.values()})
+    ctx._now = NOW.replace(hour=10)
+    cohorts.queue(ctx, cohorts.COHORTS)
+    cohorts.work_once(ctx, api)
+    cohorts.work_once(ctx, api)
+    assert mails == []  # two of three ready: no email yet
+    cohorts.work_once(ctx, api)
+    assert mails[0][:2] == (["me@x.in"], ["boss@x.in"]) and mails[0][2].startswith("Today's lists are ready")
+    assert mails[0][3] == ["no_deposit_20261022.xlsx", "low_margin_20261022.xlsx", "payout_20261022.xlsx"]
+    cohorts.work_once(ctx, api)  # churned: the others are done, so it's fetched now (in the day) and mailed
+    assert "WR1" in [c[0] for c in api.calls]
+    assert len(mails) == 2 and mails[1][2].startswith("Churned clients list is ready") and mails[1][3] == ["reactivation_20261022.xlsx"]
+    cohorts.queue(ctx, cohorts.COHORTS)
+    for _ in range(4):
+        cohorts.work_once(ctx, api)
+    assert len(mails) == 2  # once a day

@@ -154,7 +154,8 @@ def assign_upload(ctx: Ctx, upload: dict, assigned_by: str | None = None) -> dic
 
     ids = upload["client_ids"]
     held = held_count(ctx, ids)
-    ctx.conn.execute(f"UPDATE leads SET on_hold=0 WHERE lead_id IN ({','.join('?' * len(ids))})", tuple(ids))
+    ctx.conn.execute(f"UPDATE leads SET on_hold=0, released_at=? WHERE lead_id IN ({','.join('?' * len(ids))})",
+                     (iso(ctx.now()), *ids))
     ctx.conn.commit()
     run = assign_new_leads(ctx)  # hottest first across everything waiting, so capacity goes where it matters
     create_system_followups(ctx)

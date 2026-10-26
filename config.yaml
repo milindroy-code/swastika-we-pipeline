@@ -117,11 +117,14 @@ sources:
     file_categories: {}
 
   # WebEngage user-activity API (cohorts.py). The key is the REST API key, read from the WE_API_KEY environment variable
-  # or from secrets/webengage.env (git-ignored). One call at a time, delay_seconds apart, with back-off on errors.
+  # or from secrets/webengage.env (git-ignored). At most `lanes` calls in flight and max_per_minute call starts a minute;
+  # any "slow down" (429) or server error halves the pace for the rest of the run (up to max_slowdown times slower).
   webengage_api:
     host: "https://dashboard.in.webengage.com"
     account: "in~~991992ab"
-    delay_seconds: 4
+    lanes: 3               # calls in flight at once
+    max_per_minute: 50     # hard cap on call starts a minute (the first runs did 8-9 a minute; one client = 1 call)
+    max_slowdown: 8
     page_size: 2000
 
 # Map your WebEngage event names to the signals the system understands.
@@ -205,6 +208,11 @@ reactivation:
   churn_min_days: 90     # "Get the client list" for re-activation: last trade at least this many days ago...
   churn_max_days: 365    # ...and no more than this many
 
+# Assignment: the SM plans each GM's day (Team compliance > Assignment plan for today: how many new clients, which lists,
+# which priority). With require_sm_plan, a GM gets no new clients until their SM has saved a plan (payouts always go out).
+assignment:
+  require_sm_plan: true
+
 # Daily cohort lists (Customer list > Today's lists), built by `python run.py cohorts` (started by start_dashboards -Office).
 # Each cohort: client-database query -> WebEngage ID (CRM / eKYC) -> app activity from the WebEngage API -> heat score ->
 # a list held for the SM to assign. The API is one call per client, so activity is fetched overnight from fetch_at,
@@ -220,6 +228,14 @@ cohorts:
   publish_at: "08:30"
   publish_on_holidays: false
   night_only: [reactivation]   # churned clients (~5,000): fetched only overnight; daytime runs score what is already fetched
+  # Email when the lists are ready: one when the other lists are all ready, then one when the night-only list (churned) is.
+  # Needs SMTP_USER / SMTP_PASSWORD in secrets/email.env (e.g. a Google Workspace app password); notifications.email below
+  # gives the server. The analysed lists are attached. Recipients: MAIL_TO / MAIL_CC (comma-separated) in
+  # secrets/recipients.env, kept out of git; or list them here.
+  report:
+    enabled: true
+    to: []
+    cc: []
 
 # Map your sheet's categories to a lifecycle stage so the right playbook is used.
 # Stages: kyc_pending, kyc_no_deposit, funded_no_trade, dormant_trader, active_trader.
@@ -261,6 +277,9 @@ notifications:
     username: ""
     password_env: SMTP_PASSWORD # read the password from this environment variable
     from_address: ""
+    # Google Workspace SMTP relay (no password; IT allows this machine's IP): smtp_host: smtp-relay.gmail.com,
+    # smtp_auth: false, from_address: "<the sending address>"
+    smtp_auth: true
   webhook_url: ""               # optional Slack / Google Chat incoming webhook for alerts
 
 # Prioritised customer list with scores, levers and pitch, published on a schedule.

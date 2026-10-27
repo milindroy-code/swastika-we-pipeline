@@ -29,7 +29,7 @@ from .db import one, rows
 
 log = logging.getLogger(__name__)
 
-COHORTS = ["no_deposit", "low_margin", "payout", "reactivation"]  # fetch / publish order: smallest and most urgent first
+COHORTS = ["no_deposit", "low_margin", "payout", "sarthi_disabled", "sarthi_off", "reactivation"]  # fetch / publish order
 DEFAULTS = {"enabled": True, "cohorts": COHORTS, "centralised_only": True, "lookback_days": 15, "fresh_hours": 16, "refetch_after_hours": 4,
             "fetch_at": "20:00", "publish_at": "08:30", "publish_on_holidays": False,
             "night_only": ["reactivation"]}  # fetched only by the overnight run; daytime runs score what is already fetched
@@ -376,6 +376,7 @@ def _ready_today(ctx: Ctx, cohort: str) -> dict | None:
 
 
 TITLES = {"no_deposit": "New clients without deposit", "low_margin": "New clients with low margin",
+          "sarthi_disabled": "Switched Sarthi off (last 15 days)", "sarthi_off": "New clients with Sarthi not on",
           "payout": "Clients who made payouts", "reactivation": "Churned clients"}
 
 

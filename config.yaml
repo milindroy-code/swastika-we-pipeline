@@ -219,7 +219,7 @@ assignment:
 # in this order, and each list is published at publish_at (anyone not fetched in fresh_hours is topped up first).
 cohorts:
   enabled: true
-  cohorts: [no_deposit, low_margin, payout, reactivation]
+  cohorts: [no_deposit, low_margin, payout, sarthi_disabled, sarthi_off, reactivation]
   centralised_only: true
   lookback_days: 15        # first fetch for a client: this many days of activity; later fetches continue from the last one
   fresh_hours: 16          # morning publish: activity fetched within this many hours is not fetched again
@@ -236,6 +236,12 @@ cohorts:
     enabled: true
     to: []
     cc: []
+
+# Sarthi lists (Today's lists): switched Sarthi off within off_days and still off; and new clients (registered within
+# new_days) with Sarthi not switched on. A client is on one list only (upload.py CAMPAIGN_PRECEDENCE).
+sarthi_lists:
+  off_days: 15
+  new_days: 30
 
 # Map your sheet's categories to a lifecycle stage so the right playbook is used.
 # Stages: kyc_pending, kyc_no_deposit, funded_no_trade, dormant_trader, active_trader.

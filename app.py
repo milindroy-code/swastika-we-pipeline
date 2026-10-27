@@ -348,6 +348,7 @@ STAGE_NAMES = {"kyc pending": "KYC pending", "kyc no deposit": "No deposit yet",
 REFERRAL_URL = os.environ.get("REFERRAL_DASHBOARD_URL", "http://localhost:8503")
 SARTHI_URL = os.environ.get("SARTHI_DASHBOARD_URL", "http://localhost:8504")
 LIST_LABELS = {"new": "New, no deposit", "low_margin": "Low margin", "reactivation": "Churned, active again", "payout": "Payout",
+               "sarthi_disabled": "Sarthi switched off", "sarthi_off": "Sarthi not on",
                "referral": "Referral ask"}
 
 
@@ -877,6 +878,7 @@ def _customer_rows(_ctx_id: int) -> list[dict]:
 
 PULL_PRESETS = {"no_deposit": "New clients without deposit", "low_margin": "New clients with low margin (under ₹{target})",
                 "reactivation": "Churned clients (last trade 90–365 days ago)", "payout": "Clients who made payouts (over 25% of balance, last 7 days)",
+                "sarthi_disabled": "Switched Sarthi off in the last 15 days", "sarthi_off": "New clients (last 30 days) with Sarthi not on",
                 "custom": "My own list of client IDs"}
 
 
@@ -991,7 +993,8 @@ def history_score_section() -> None:
 
 
 COHORT_TITLES = {"no_deposit": "New clients without deposit", "low_margin": "New clients with low margin",
-                 "payout": "Clients who made payouts", "reactivation": "Churned clients"}
+                 "payout": "Clients who made payouts", "sarthi_disabled": "Switched Sarthi off (15 days)",
+                 "sarthi_off": "New clients, Sarthi not on", "reactivation": "Churned clients"}
 
 
 def _upload_label(u: dict) -> str:
@@ -1015,9 +1018,10 @@ def todays_lists() -> None:
                f"{s['publish_at']}" + (", centralised clients only." if s["centralised_only"] else ".")
                + " Nothing goes to a GM until you open the list and press Assign.")
     runs = cohorts.latest_runs(ctx)
-    cols = st.columns(len(runs))
+    items = list(runs.items())
+    cols = [c for i in range(0, len(items), 3) for c in st.columns(3)]  # three cards a row
     stalled = False
-    for col, (cohort, r) in zip(cols, runs.items()):
+    for col, (cohort, r) in zip(cols, items):
         last, ready = r["last"], r["ready"]
         title = COHORT_TITLES.get(cohort, cohort).replace("{target}", f"{sarthi_target(ctx):,}")
         with col.container(border=True):
@@ -1071,7 +1075,8 @@ def upload_section() -> None:
         db_ok = client_db_available(ctx)
         pull_section(db_ok)
         st.divider()
-        list_type = st.radio("② What is this list? (sets the scoring rules and the pitch for the analysis)", ["no_deposit", "low_margin", "reactivation", "payout"],
+        list_type = st.radio("② What is this list? (sets the scoring rules and the pitch for the analysis)",
+                             ["no_deposit", "low_margin", "reactivation", "payout", "sarthi_disabled", "sarthi_off"],
                              format_func=lambda k: LIST_TYPES[k][0].replace("{target}", goal_txt),
                              key="sm_list_type", horizontal=True, **({} if "sm_list_type" in st.session_state else {"index": None}))
         if list_type == "low_margin":

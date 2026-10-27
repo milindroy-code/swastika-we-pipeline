@@ -45,12 +45,16 @@ LIST_TYPES = {
     "low_margin": ("New clients with low margin, deposits under {target} (top up to {target})", "Not yet matched in client DB", "low_margin"),
     "reactivation": ("Churned clients showing activity (resurrect; only engaged ones go to GMs)", "Not yet matched in client DB", "reactivation"),
     "payout": ("Clients who made payouts (keep them invested and trading)", "Not yet matched in client DB", "payout"),
+    "sarthi_disabled": ("Switched Sarthi off in the last 15 days (win them back)", "Not yet matched in client DB", "sarthi_disabled"),
+    "sarthi_off": ("New clients with Sarthi not switched on (switch it on together)", "Not yet matched in client DB", "sarthi_off"),
     "unknown": ("Mixed / not sure (work it out from app activity)", None, ""),  # not offered in the dashboard
 }
 TIER_FILL = {"🔥 Hot": "FCDDD9", "🌤️ Warm": "FFF2CC", "❄️ Cold": "E6EFFC"}
 
 
-CAMPAIGN_PRECEDENCE = ["payout", "reactivation", "low_margin", "new"]
+# A client is on one list only: when two lists hold them, the earlier one here wins. A recent Sarthi switch-off is urgent
+# (just lost); Sarthi-not-on comes last, since a deposit or a top-up matters more than switching Sarthi on.
+CAMPAIGN_PRECEDENCE = ["payout", "sarthi_disabled", "reactivation", "low_margin", "new", "sarthi_off"]
 
 
 def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_client_db: bool = True,

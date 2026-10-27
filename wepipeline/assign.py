@@ -36,6 +36,7 @@ def pick_caller(ctx: Ctx, category: str, load: dict[str, int], payout: bool = Fa
 
 # ---------------------------------------------------------------- each GM's plan for the day
 PLAN_LISTS = {"no_deposit": "New clients without deposit", "low_margin": "Low margin clients", "payout": "Payout customers",
+              "sarthi_disabled": "Switched Sarthi off (15 days)", "sarthi_off": "Sarthi not on (new clients)",
               "reactivation": "Churned customers"}
 PLAN_TIERS = {"hot": "🔥 Hot", "warm": "🌤️ Warm", "cold": "❄️ Cold"}
 DEFAULT_PLAN = {"new_clients": None, "lists": list(PLAN_LISTS), "tiers": list(PLAN_TIERS)}  # nothing set: as before
@@ -44,7 +45,8 @@ DEFAULT_PLAN = {"new_clients": None, "lists": list(PLAN_LISTS), "tiers": list(PL
 
 
 def list_key(campaign: str | None) -> str:
-    return {"low_margin": "low_margin", "payout": "payout", "reactivation": "reactivation"}.get(campaign or "", "no_deposit")
+    return {"low_margin": "low_margin", "payout": "payout", "reactivation": "reactivation", "sarthi_disabled": "sarthi_disabled",
+            "sarthi_off": "sarthi_off"}.get(campaign or "", "no_deposit")
 
 
 def plan_accepts(plan: dict, lead: dict, taken_today: int) -> bool:

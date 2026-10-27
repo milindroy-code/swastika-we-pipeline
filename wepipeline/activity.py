@@ -92,7 +92,7 @@ def stage_for(ctx: Ctx, lead: dict, summary: dict) -> str:
         return "payout"
     if lead.get("campaign") == "referral":  # one of our most active traders: thank them, ask for a referral
         return "referral"
-    if lead.get("campaign") == "sarthi":  # Sarthi switched off: show it, switch it on together
+    if lead.get("campaign") in ("sarthi", "sarthi_disabled", "sarthi_off"):  # Sarthi off: show it, switch it on together
         return "sarthi_activation"
     if lead.get("campaign") == "low_margin":  # funded, but below the funded-account target
         return "low_margin"

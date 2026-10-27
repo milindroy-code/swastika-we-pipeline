@@ -127,8 +127,7 @@ def test_schedule_queues_the_fetch_and_the_publish_once_a_day(ctx):
     assert cohorts.schedule(ctx) == ["publish", "fetch"]  # 21:00: past both times today
     assert cohorts.schedule(ctx) == []
     queued = rows(ctx.conn, "SELECT cohort, publish FROM cohort_runs ORDER BY id")
-    assert [(r["cohort"], r["publish"]) for r in queued][:4] == [(c, 1) for c in cohorts.COHORTS]
-    assert len(queued) == 4  # the fetch is not queued again on top of the publish runs
+    assert [(r["cohort"], r["publish"]) for r in queued] == [(c, 1) for c in cohorts.COHORTS]  # the fetch isn't queued on top
     ctx._now = datetime(2026, 10, 24, 9, 0, tzinfo=TZ)  # Saturday: no lists to publish
     assert cohorts.schedule(ctx) == []
 
@@ -238,13 +237,15 @@ def test_churned_fetches_once_the_other_lists_are_done_and_emails_go_out(ctx, mo
     mails = []
     monkeypatch.setattr(notify, "send_mail", lambda c, to, subject, body, cc=None, attachments=None:
                         mails.append((to, cc, subject, [a[0] for a in attachments or []])) or True)
-    ctx.cfg["cohorts"] = {**ctx.cfg.get("cohorts", {}), "report": {"enabled": True, "to": ["me@x.in"], "cc": ["boss@x.in"]}}
+    ctx.cfg["cohorts"] = {**ctx.cfg.get("cohorts", {}), "report": {"enabled": True, "to": ["me@x.in"], "cc": ["boss@x.in"]},
+                          "cohorts": ["no_deposit", "low_margin", "payout", "reactivation"]}
     lists = {"no_deposit": ["N1"], "low_margin": ["L1"], "payout": ["P1"], "reactivation": ["R1"]}
     monkeypatch.setattr(cohorts, "pull_cohort", lambda c, k: pd.DataFrame({"CLIENT_ID": lists[k], "IsCentralized": [1]}))
     monkeypatch.setattr(cohorts, "lookup_we_ids", lambda c, ids: {i: "W" + i for i in ids})
     api = FakeApi({"W" + i[0]: [ev("ORDER_PLACED_MOB", 1)] for i in lists.values()})
     ctx._now = NOW.replace(hour=10)
-    cohorts.queue(ctx, cohorts.COHORTS)
+    four = ctx.cfg["cohorts"]["cohorts"]
+    cohorts.queue(ctx, four)
     cohorts.work_once(ctx, api)
     cohorts.work_once(ctx, api)
     assert mails == []  # two of three ready: no email yet
@@ -254,7 +255,14 @@ def test_churned_fetches_once_the_other_lists_are_done_and_emails_go_out(ctx, mo
     cohorts.work_once(ctx, api)  # churned: the others are done, so it's fetched now (in the day) and mailed
     assert "WR1" in [c[0] for c in api.calls]
     assert len(mails) == 2 and mails[1][2].startswith("Churned clients list is ready") and mails[1][3] == ["reactivation_20261022.xlsx"]
-    cohorts.queue(ctx, cohorts.COHORTS)
+    cohorts.queue(ctx, four)
     for _ in range(4):
         cohorts.work_once(ctx, api)
     assert len(mails) == 2  # once a day
+
+
+def test_a_client_on_two_lists_is_worked_on_one(ctx):
+    from wepipeline.upload import CAMPAIGN_PRECEDENCE
+
+    rank = {c: i for i, c in enumerate(CAMPAIGN_PRECEDENCE)}
+    assert rank["payout"] < rank["sarthi_disabled"] < rank["low_margin"] < rank["new"] < rank["sarthi_off"]

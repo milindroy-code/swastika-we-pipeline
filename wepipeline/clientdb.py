@@ -143,6 +143,27 @@ FROM (
 JOIN [Repl_TargetReview].[dbo].[tbl_ClientNew] C ON C.CLIENT_ID = P.ACCOUNTCODE
 WHERE {NOT_CLOSED}
 ORDER BY P.LastPayoutDate DESC""",
+    # switched Sarthi off within sarthi_off_days (the activation history's latest "off") and still off
+    "sarthi_disabled": f"""
+SELECT C.CLIENT_ID, C.REGISTRATION_DATE, D.SarthiOffOn, F.FirstDeposit, F.LTD AS LastTradeDate
+FROM (
+    SELECT ClientCode, MAX(CreatedOn) AS SarthiOffOn FROM [Repl_TargetReview].[dbo].[tbl_SarthiActivationHistory]
+    WHERE SarthiActivationFlag = 0 AND CreatedOn >= DATEADD(DAY, -{{sarthi_off_days}}, GETDATE()) GROUP BY ClientCode
+) D
+JOIN [Repl_TargetReview].[dbo].[tbl_ClientNew] C ON C.CLIENT_ID = D.ClientCode
+LEFT JOIN [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F ON C.CLIENT_ID = F.CLIENT_ID
+WHERE ISNULL(CAST(C.IsSarthiTIOn AS INT), 0) = 0 AND {NOT_CLOSED}
+ORDER BY D.SarthiOffOn DESC""",
+    # Sarthi not switched on, registered within sarthi_new_days; a recent switch-off is on the list above instead
+    "sarthi_off": f"""
+SELECT C.CLIENT_ID, C.REGISTRATION_DATE, F.FirstDeposit, F.LTD AS LastTradeDate
+FROM [Repl_TargetReview].[dbo].[tbl_ClientNew] C
+LEFT JOIN [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F ON C.CLIENT_ID = F.CLIENT_ID
+WHERE ISNULL(CAST(C.IsSarthiTIOn AS INT), 0) = 0 AND {NOT_CLOSED}
+  AND C.REGISTRATION_DATE >= DATEADD(DAY, -{{sarthi_new_days}}, CAST(GETDATE() AS DATE))
+  AND NOT EXISTS (SELECT 1 FROM [Repl_TargetReview].[dbo].[tbl_SarthiActivationHistory] H WHERE H.ClientCode = C.CLIENT_ID
+                  AND H.SarthiActivationFlag = 0 AND H.CreatedOn >= DATEADD(DAY, -{{sarthi_off_days}}, GETDATE()))
+ORDER BY C.REGISTRATION_DATE DESC""",
     # traded before, no trade in the last churn_min_days but one within churn_max_days
     "reactivation": f"""
 SELECT C.CLIENT_ID, C.REGISTRATION_DATE, F.LTD AS LastTradeDate, DATEDIFF(DAY, F.LTD, GETDATE()) AS DaysSinceLastTrade
@@ -161,14 +182,17 @@ def list_query(ctx: Ctx, list_type: str) -> str | None:
     c = _cfg(ctx)
     r = ctx.cfg.get("reactivation") or {}
     p = ctx.cfg.get("payout") or {}
+    sl = ctx.cfg.get("sarthi_lists") or {}
     sql = {"no_deposit": c.get("new_clients_query"), "low_margin": c.get("low_margin_query") or LIST_SQL["low_margin"],
            "reactivation": c.get("reactivation_query") or LIST_SQL["reactivation"],
-           "payout": c.get("payout_query") or LIST_SQL["payout"]}.get(list_type)
+           "payout": c.get("payout_query") or LIST_SQL["payout"],
+           "sarthi_disabled": LIST_SQL["sarthi_disabled"], "sarthi_off": LIST_SQL["sarthi_off"]}.get(list_type)
     if not sql:
         return None
     for k, v in {"window_days": window_days(ctx), "target": int(target(ctx)), "churn_min_days": int(r.get("churn_min_days", 90)),
                  "churn_max_days": int(r.get("churn_max_days", 365)), "payout_days": int(p.get("pull_days", 7)),
-                 "payout_share": float(p.get("share_of_balance", 0.25)), "balance_days": int(p.get("balance_days", 365))}.items():
+                 "payout_share": float(p.get("share_of_balance", 0.25)), "balance_days": int(p.get("balance_days", 365)),
+                 "sarthi_off_days": int(sl.get("off_days", 15)), "sarthi_new_days": int(sl.get("new_days", 30))}.items():
         sql = sql.replace("{" + k + "}", str(v))
     return sql
 

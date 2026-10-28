@@ -3,6 +3,7 @@
 Turns WebEngage app activity, new no-deposit clients from the back office, and the live client sheet into a prioritised
 calling queue. It enforces follow-up time limits and reports compliance.
 
+
 **Roles:** **GMs** (Growth Managers) do the calling and work their queue. **SMs** (Service Managers) mentor their GMs,
 receive escalations and get team reports. The **admin** (PIN) sets the follow-up time limits.
 

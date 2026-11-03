@@ -121,21 +121,29 @@ def test_client_types_new_first_and_filters(ctx):
     df = pd.DataFrame([
         {"CLIENT_ID": "NEWBIE", "TotalTrades": 12, "ActiveTradingDays": 5, "FirstTradeInPeriod": "2026-09-28", "LastTradeDate": "2026-10-05",
          "ActivityBucket": "Low", "IsSarthiTIOn": None, "IsAccountClosed": 0, "REGISTRATION_DATE": "2026-09-25"},          # joined 11 days ago
-        {"CLIENT_ID": "BACK", "TotalTrades": 40, "ActiveTradingDays": 12, "FirstTradeInPeriod": "2026-09-26", "LastTradeDate": "2026-10-05",
-         "ActivityBucket": "Medium", "IsSarthiTIOn": None, "IsAccountClosed": 0, "REGISTRATION_DATE": "2022-01-10"},       # old, trading again
+        {"CLIENT_ID": "BACK", "TotalTrades": 40, "ActiveTradingDays": 12, "FirstTradeInPeriod": "2026-08-10", "LastTradeDate": "2026-09-05",
+         "ActivityBucket": "Medium", "IsSarthiTIOn": None, "IsAccountClosed": 0, "REGISTRATION_DATE": "2022-01-10"},       # quiet for a month
         {"CLIENT_ID": "REGULAR", "TotalTrades": 160, "ActiveTradingDays": 40, "FirstTradeInPeriod": "2026-08-10", "LastTradeDate": "2026-10-05",
-         "ActivityBucket": "Very High", "IsSarthiTIOn": None, "IsAccountClosed": 0, "REGISTRATION_DATE": "2021-05-01"}])
+         "ActivityBucket": "Very High", "IsSarthiTIOn": None, "IsAccountClosed": 0, "REGISTRATION_DATE": "2021-05-01",
+         "Turnover": 2500000, "RecentTrades": 90},
+        {"CLIENT_ID": "SLOWING", "TotalTrades": 60, "ActiveTradingDays": 20, "FirstTradeInPeriod": "2026-08-10", "LastTradeDate": "2026-10-04",
+         "ActivityBucket": "High", "IsSarthiTIOn": None, "IsAccountClosed": 0, "REGISTRATION_DATE": "2021-05-01",
+         "Turnover": 400000, "RecentTrades": 6},                                                                      # 54 before, 6 lately
+        {"CLIENT_ID": "NEWISH", "TotalTrades": 12, "ActiveTradingDays": 6, "FirstTradeInPeriod": "2026-09-01", "LastTradeDate": "2026-10-05",
+         "ActivityBucket": "Low", "IsSarthiTIOn": None, "IsAccountClosed": 0, "REGISTRATION_DATE": "2026-08-01"}])        # joined ~2 months ago
     act.load_traders(ctx, df)
     m = members(ctx)
-    assert {k: v["segment"] for k, v in m.items()} == {"NEWBIE": "new", "BACK": "resurrected", "REGULAR": "active"}
+    assert {k: v["segment"] for k, v in m.items()} == {"NEWBIE": "new", "BACK": "pre_churn", "REGULAR": "active",
+                                                         "SLOWING": "pre_churn", "NEWISH": "new_later"}
+    assert "(₹25.0 lakh traded)" in m["REGULAR"]["heat_reasons"]  # volume counts the ₹ traded, not only the trade count
     assert "new client (joined 25 Sep)" in m["NEWBIE"]["heat_reasons"]
     assert m["REGULAR"]["heat_score"] > m["NEWBIE"]["heat_score"]               # the heavy trader still scores higher...
     act.start_drive(ctx, per_gm=3, start_now=True)
     assert [c["lead_id"] for c in act.my_calls(ctx, "gm")][0] == "NEWBIE"       # ...but new clients are handed out first
     act.end_drive(ctx)
-    assert act.start_drive(ctx, per_gm=3, start_now=True, segments=["resurrected"])["assigned"] == 1
-    assert [c["lead_id"] for c in act.my_calls(ctx, "gm")] == ["BACK"]
-    assert act.summary(ctx)["by_type"] == {"new": 1, "active": 1, "resurrected": 0}
+    assert act.start_drive(ctx, per_gm=3, start_now=True, segments=["pre_churn"])["assigned"] == 2
+    assert sorted(c["lead_id"] for c in act.my_calls(ctx, "gm")) == ["BACK", "SLOWING"]
+    assert act.summary(ctx)["by_type"] == {"new": 1, "new_later": 1, "active": 1, "pre_churn": 0}
 
 
 def test_every_new_client_with_sarthi_off_joins_unless_on_a_funding_list(ctx):

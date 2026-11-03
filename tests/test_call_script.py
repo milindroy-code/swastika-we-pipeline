@@ -47,19 +47,23 @@ def test_raw_event_names_are_not_segments():
     assert not _event_code("F&O") and not _event_code("Equity")
 
 
-def test_analysed_sheet_has_the_three_script_columns_after_client_code(ctx, tmp_path):  # noqa: F811
+def test_analysed_sheet_has_simple_talking_points_and_the_full_script_in_details(ctx, tmp_path):  # noqa: F811
     path = tmp_path / "list.xlsx"
     with pd.ExcelWriter(path) as xl:
         pivot("ORDER_PLACED_MOB", {"HOTC": {"8 Oct, 10AM": 4}}).to_excel(xl, sheet_name="ORDER_PLACED_MOB", index=False)
         pivot("CALL_ACCEPTED_MOB", {"HOTC": {"8 Oct, 9AM": 5}}).to_excel(xl, sheet_name="CALL_ACCEPTED_MOB", index=False)
     analyse_upload(ctx, path, uploaded_by="sm_01", list_type="no_deposit")
-    ws = batch_workbook(ctx, list_uploads(ctx)[0])["Analysed list"]
+    wb = batch_workbook(ctx, list_uploads(ctx)[0])
+    ws = wb["Analysed list"]
     head = [c.value for c in ws[1]]
-    assert head[3:9] == ["Client profile", "App activity", "Engagement levers", "Insight", "Call script", "Ask (call to action)"]
+    assert head[3:8] == ["App login", "App surfaces used (7 d)", "Lever: friction / last trade", "Talking points", "Ask"]
     row = {h: c.value for h, c in zip(head, ws[2])}
-    assert row["Insight"].split("\n")[:2] == ["• Account khula hai par abhi tak paisa nahi daala",
-                                              "• 4 order lagane ki koshish ki, par funds na hone se nahi gaya"]
     assert row["Priority"].startswith("🔥 Hot · ") and row["Client"] == "HOTC"
-    assert "₹30,000" in row["Ask (call to action)"]
+    assert row["Talking points"].startswith("1. ") and "₹30,000" in row["Ask"]
+    det = wb["Details"]
+    dh = [c.value for c in det[1]]
+    drow = {h: c.value for h, c in zip(dh, det[2])}
+    assert drow["Insight"].split("\n")[:2] == ["• Account khula hai par abhi tak paisa nahi daala",
+                                                "• 4 order lagane ki koshish ki, par funds na hone se nahi gaya"]
     ins = customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='HOTC'"))
-    assert ins["script_text"] == row["Call script"]
+    assert ins["script_text"] == drow["Full call script"]

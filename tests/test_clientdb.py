@@ -185,7 +185,7 @@ def test_each_list_type_has_its_query_with_the_window_target_and_churn_days_fill
     ctx.cfg["reactivation"] = {**(ctx.cfg.get("reactivation") or {}), "churn_min_days": 90, "churn_max_days": 365}
     ctx.cfg["sources"]["client_db"]["payout_query"] = ""
     low, churn = list_query(ctx, "low_margin"), list_query(ctx, "reactivation")
-    assert "FirstDeposit < 30000" in low and "{" not in low
+    assert "ISNULL(L.PayIns, F.FirstDeposit) < 30000" in low and "FA_TRANSACTIONS" in low and "{" not in low  # all pay-ins, not the first
     assert "DATEADD(DAY, -90," in churn and "DATEADD(DAY, -365," in churn and "IsAccountClosed" in churn
     assert "{window_days}" not in list_query(ctx, "no_deposit")
     payout = list_query(ctx, "payout")
@@ -221,6 +221,7 @@ def test_client_ids_are_read_from_a_named_column_or_the_first_one_deduplicated()
 
 
 def test_an_uploaded_app_history_score_is_blended_into_heat(ctx):
+    ctx.cfg["call_score"] = {"fresh_bonus": 0}  # this test is about the blend, not call history
     from wepipeline import prior_score
 
     for cid in ("STRONG", "QUIET", "NOSCORE"):

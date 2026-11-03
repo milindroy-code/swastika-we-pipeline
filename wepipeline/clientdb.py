@@ -109,14 +109,26 @@ NO_DEPOSIT_CATEGORIES = {label for _, label in _bucket_spec()}
 # ---------------------------------------------------------------- pull a list's clients (for the WebEngage team)
 NOT_CLOSED = "ISNULL(CAST(C.IsAccountClosed AS VARCHAR(10)), '0') NOT IN ('1', 'True', 'true')"
 LIST_SQL = {
-    # funded, but the first deposit is below the funding target
+    # funded, but still below the funding target: everything paid in since registering (pay-ins in the back-office
+    # ledger) under the target. The first deposit alone is not enough: clients who started small and topped up to the
+    # target are funded (29 Oct: 134 of 560 such clients were on the low margin lists). Withdrawals don't count against
+    # it: a funded client who pays out is on the payout list, not this one.
     "low_margin": f"""
 SELECT C.CLIENT_ID, C.REGISTRATION_DATE, F.FirstDeposit, F.FirstDepositDate,
+       ISNULL(L.PayIns, F.FirstDeposit) AS TotalPayIns, ISNULL(L.Payouts, 0) AS TotalPayouts,
+       ISNULL(L.PayIns, F.FirstDeposit) - ISNULL(L.Payouts, 0) AS NetFunded,
        DATEDIFF(DAY, C.REGISTRATION_DATE, GETDATE()) AS DaysSinceRegistration
 FROM [Repl_TargetReview].[dbo].[tbl_ClientNew] C
 JOIN [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F ON C.CLIENT_ID = F.CLIENT_ID
+LEFT JOIN (
+    SELECT ACCOUNTCODE, SUM(CASE WHEN TRANS_TYPE = 'r' THEN ISNULL(CR_AMT, 0) ELSE 0 END) AS PayIns,
+           SUM(CASE WHEN TRANS_TYPE = 'p' THEN ISNULL(DR_AMT, 0) ELSE 0 END) AS Payouts
+    FROM [192.168.0.18].Capsfo.dbo.FA_TRANSACTIONS
+    WHERE TRANS_TYPE IN ('p', 'r') AND VOUCHERDATE >= DATEADD(DAY, -{{window_days}} - 7, CAST(GETDATE() AS DATE))
+    GROUP BY ACCOUNTCODE
+) L ON L.ACCOUNTCODE = C.CLIENT_ID
 WHERE C.REGISTRATION_DATE >= DATEADD(DAY, -{{window_days}}, CAST(GETDATE() AS DATE))
-  AND F.FirstDeposit > 0 AND F.FirstDeposit < {{target}} AND {NOT_CLOSED}
+  AND F.FirstDeposit > 0 AND ISNULL(L.PayIns, F.FirstDeposit) < {{target}} AND {NOT_CLOSED}
 ORDER BY DaysSinceRegistration ASC""",
     # a payout of more than payout_share of the balance just before it, in the last payout_days. Balance = pay-ins (TRANS_TYPE
     # 'r', CR_AMT) minus payouts ('p', DR_AMT) over balance_days, from the back-office ledger (FA_TRANSACTIONS), as the
@@ -175,8 +187,9 @@ ORDER BY F.LTD DESC""",
 }
 
 
-def list_query(ctx: Ctx, list_type: str) -> str | None:
-    """The read-only query behind a list type, with its parameters filled in. None when there is no query yet (payouts)."""
+def list_query(ctx: Ctx, list_type: str, window: int | None = None) -> str | None:
+    """The read-only query behind a list type, with its parameters filled in. None when there is no query yet (payouts).
+    `window` replaces the registration window (the later age bucket pulls up to 90 days and keeps 31-90)."""
     from .sarthi import target, window_days
 
     c = _cfg(ctx)
@@ -189,7 +202,7 @@ def list_query(ctx: Ctx, list_type: str) -> str | None:
            "sarthi_disabled": LIST_SQL["sarthi_disabled"], "sarthi_off": LIST_SQL["sarthi_off"]}.get(list_type)
     if not sql:
         return None
-    for k, v in {"window_days": window_days(ctx), "target": int(target(ctx)), "churn_min_days": int(r.get("churn_min_days", 90)),
+    for k, v in {"window_days": window or window_days(ctx), "target": int(target(ctx)), "churn_min_days": int(r.get("churn_min_days", 90)),
                  "churn_max_days": int(r.get("churn_max_days", 365)), "payout_days": int(p.get("pull_days", 7)),
                  "payout_share": float(p.get("share_of_balance", 0.25)), "balance_days": int(p.get("balance_days", 365)),
                  "sarthi_off_days": int(sl.get("off_days", 15)), "sarthi_new_days": int(sl.get("new_days", 30))}.items():
@@ -228,10 +241,10 @@ def with_centralised_flag(ctx: Ctx, sql: str) -> str:
 FROM ({inner}) L"""
 
 
-def pull_list(ctx: Ctx, list_type: str) -> pd.DataFrame:
+def pull_list(ctx: Ctx, list_type: str, window: int | None = None) -> pd.DataFrame:
     """The clients a list type covers, straight from the client database: one row per client, CLIENT_ID first,
     with an IsCentralized flag (1 / 0) so the page can show all clients or centralised ones only."""
-    sql = list_query(ctx, list_type)
+    sql = list_query(ctx, list_type, window)
     if not sql:
         raise ValueError("There's no client-database query for this list yet. Upload the list as a file instead.")
     df = _query(ctx, with_centralised_flag(ctx, sql))

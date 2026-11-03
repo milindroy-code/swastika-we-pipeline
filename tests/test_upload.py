@@ -87,12 +87,13 @@ def test_analysed_workbook_has_list_and_summary(ctx, tmp_path):
     wb = batch_workbook(ctx, list_uploads(ctx)[0])
     assert wb.sheetnames == ["Summary", "Analysed list", "Activity timeline", "Details"]
     ws = wb["Analysed list"]
-    assert [c.value for c in ws[1]] == ["Rank", "Priority", "Client", "Client profile", "App activity", "Engagement levers",
-                                        "Insight", "Call script", "Ask (call to action)", "Agar customer bole",
-                                        "When to call", "GM", "Status"]
+    assert [c.value for c in ws[1]] == ["Rank", "Priority", "Client", "App login", "App surfaces used (7 d)",
+                                        "Lever: friction / last trade", "Talking points", "Ask", "When to call",
+                                        "Calls (last 7 d)", "Calls (last 48 h)", "Call now?", "Last call", "GM", "Status"]
     assert ws.max_row == 3 and wb["Details"]["A1"].value == "Rank in this list"
     row = {c.value: v.value for c, v in zip(ws[1], ws[2])}
     assert row["GM"] is None and row["Status"] == "open: waiting for Assign (SM)"  # GM stays empty until assigned
+    assert row["Calls (last 48 h)"] == "0 attempts · 0 connects" and row["Call now?"] == "Call now (never called)"
     assert wb["Summary"]["B5"].value.startswith("=COUNTIFS(")
 
 

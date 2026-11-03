@@ -172,9 +172,9 @@ def log_call(
 def expire_out_of_window(ctx: Ctx) -> int:
     """New and low-margin clients are worked within the registration window. Past it (and not funded at the target)
     they move to 'out of window' and their follow-ups stop. Re-activation and payout clients are not bound by it."""
-    from .sarthi import window_days
+    from .sarthi import later_window_days
 
-    limit = window_days(ctx)
+    limit = later_window_days(ctx)  # 0-30 and 31-90 day buckets are both worked
     expired = 0
     for lead in rows(ctx.conn, "SELECT lead_id, extra, campaign, category FROM leads WHERE status='open' "
                                "AND COALESCE(campaign,'') NOT IN ('reactivation','payout','referral','sarthi')"):
@@ -232,7 +232,7 @@ def _pending_rows(ctx: Ctx, agent_id: str) -> list[dict]:
     return rows(
         ctx.conn,
         """SELECT f.*, l.name, l.phone, l.category, l.npc_count, l.last_outcome, l.last_contact_at,
-                  l.heat_score, l.heat_tier, l.heat_reasons, l.campaign
+                  l.heat_score, l.heat_tier, l.heat_reasons, l.campaign, l.extra
            FROM followups f JOIN leads l ON l.lead_id = f.lead_id
            WHERE f.agent_id=? AND f.status='pending' AND l.status='open'
            ORDER BY CASE WHEN l.campaign='payout' THEN 0 WHEN l.heat_tier='hot' THEN 0 WHEN l.heat_tier='warm' THEN 1 ELSE 2 END,

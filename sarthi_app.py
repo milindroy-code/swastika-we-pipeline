@@ -54,7 +54,7 @@ team = ctx.team()
 labels = {m["id"]: f"{m['name']} · {'SM' if ctx.is_sm(m) else 'GM'}" for m in team}
 me_id = st.sidebar.selectbox("You are", list(labels), format_func=labels.get)
 is_sm = ctx.is_sm(ctx.member(me_id))
-pages = ["📊 Campaign report", "Target list", "Campaign & drives"] if is_sm else ["My Sarthi calls"]
+pages = ["📋 Cohort lists", "📊 Campaign report", "Target list", "Campaign & drives"] if is_sm else ["My Sarthi calls"]
 page = st.sidebar.radio("Page", pages)
 s = act.settings(ctx)
 st.sidebar.caption(f"Target: clients with Sarthi off · traders ({', '.join(b.title() for b in s['buckets'])}) and app users "
@@ -113,6 +113,103 @@ def _report(p: dict, what: str) -> None:
 
 
 # ---------------------------------------------------------------- SM pages
+def _cohort_xlsx(data: list[dict], title: str) -> bytes:
+    import io
+
+    from openpyxl.styles import Font, PatternFill
+
+    buf = io.BytesIO()
+    df = pd.DataFrame(data)
+    with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+        df.to_excel(xl, sheet_name=title[:31], index=False)
+        ws = xl.sheets[title[:31]]
+        fills = {"🔥": "FCDDD9", "🌤": "FFF2CC", "❄": "E6EFFC"}
+        for row in ws.iter_rows():
+            for c in row:
+                c.font = Font(name="Arial", bold=c.row == 1)
+        if "Priority" in df:
+            col = list(df.columns).index("Priority") + 1
+            for i, v in enumerate(df["Priority"], start=2):
+                fill = next((f for k, f in fills.items() if str(v).startswith(k)), None)
+                if fill:
+                    ws.cell(row=i, column=col).fill = PatternFill("solid", fgColor=fill)
+        for i, w in enumerate([12, 22, 22, 11, 10, 13, 10, 10, 14, 13, 16, 10, 16, 10, 90], start=1):
+            ws.column_dimensions[chr(64 + i)].width = w
+        ws.freeze_panes = "B2"
+    return buf.getvalue()
+
+
+@st.fragment(run_every="30s")
+def cohort_lists() -> None:
+    """Like Today's lists on the main dashboard: per client type, the list → WebEngage app activity → heat score → download."""
+    from wepipeline import cohorts
+
+    st.subheader("📋 Cohort lists")
+    st.caption("Clients with Sarthi off, by client type. For each: the list (from the trade books, new-client pull and app use) → "
+               "WebEngage app activity for those clients → heat score (trading: how often, ₹ traded, how recently; app activity; "
+               "Sarthi interest) → download. Refreshed every night with the daily lists; fetch a cohort now with its button.")
+    status = act.cohort_status(ctx)
+    live = {r["cohort"]: r for r in rows(ctx.conn, "SELECT * FROM cohort_runs WHERE cohort LIKE 'sarthi_pool%' "
+                                                   "AND status IN ('queued','running') ORDER BY id")}
+    whole = live.get(cohorts.POOL)
+    types = list(act.TYPE_ORDER)
+    cols = [c for i in range(0, len(types), 2) for c in st.columns(2)]
+    for col, t in zip(cols, types):
+        d = status.get(t) or {"clients": 0, "fetched": 0, "hot": 0, "warm": 0, "cold": 0, "scored": None}
+        run = live.get(f"{cohorts.POOL}:{t}") or whole
+        with col.container(border=True):
+            st.markdown(f"**{act.CLIENT_TYPES[t]}**")
+            st.markdown(f"**1. List** · {d['clients']:,} clients")
+            share = d["fetched"] / d["clients"] if d["clients"] else 0
+            st.progress(share, text=f"2. App activity · fetched for {d['fetched']:,} of {d['clients']:,}")
+            if run:
+                step = run["step"] or "Waiting to start"
+                st.caption(f"⏳ {step}" + (f": {run['fetched']:,} / {run['to_fetch']:,}" if run["to_fetch"] else "")
+                           + (" (whole pool)" if run is whole else ""))
+            st.markdown(f"**3. Heat score** · 🔥 {d['hot']:,} · 🌤️ {d['warm']:,} · ❄️ {d['cold']:,}"
+                        + (f" · scored {fmt(d['scored'])}" if d["scored"] else ""))
+            b1, b2 = st.columns(2)
+            if b1.button("🔄 Fetch & re-score", key=f"coh_fetch_{t}", disabled=bool(run) or not d["clients"], width="stretch",
+                         help="WebEngage app activity for everyone in this cohort not fetched in the last 16 hours (about 50 "
+                              "a minute), then every client's heat score. Runs after any daily list being built."):
+                cohorts.queue(ctx, [f"{cohorts.POOL}:{t}"], publish=True, requested_by=me_id)
+                st.rerun()
+            if d["clients"]:
+                if b2.button("⬇️ Prepare download", key=f"coh_prep_{t}", width="stretch"):
+                    st.session_state[f"coh_file_{t}"] = _cohort_xlsx(act.cohort_rows(ctx, t), act.CLIENT_TYPES[t].split(" ", 1)[1])
+                if st.session_state.get(f"coh_file_{t}"):
+                    st.download_button("Download (.xlsx)", st.session_state[f"coh_file_{t}"], width="stretch",
+                                       file_name=f"sarthi_{t}_{ctx.now():%Y%m%d_%H%M}.xlsx", key=f"coh_dl_{t}",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.divider()
+    pick = st.selectbox("Preview", types, format_func=act.CLIENT_TYPES.get, key="coh_preview")
+    data = act.cohort_rows(ctx, pick)
+    st.dataframe(pd.DataFrame(data[:200]), hide_index=True, width="stretch", height=420)
+    if len(data) > 200:
+        st.caption(f"Showing the top 200 of {len(data):,} by heat score: download the cohort for all of them.")
+
+
+def pool_activity_line() -> None:
+    """How much of the pool has WebEngage app activity behind its score; fetch it now if wanted."""
+    from wepipeline import cohorts
+
+    n = rows(ctx.conn, """SELECT COUNT(*) AS n, SUM(CASE WHEN w.client_id IS NOT NULL THEN 1 ELSE 0 END) AS fetched,
+                         MAX(w.fetched_at) AS last FROM drive_members m LEFT JOIN we_fetch w ON w.client_id = m.lead_id
+                         WHERE m.program='sarthi' AND m.status='open'""")[0]
+    last = rows(ctx.conn, "SELECT status, step, to_fetch, fetched FROM cohort_runs WHERE cohort=? ORDER BY id DESC LIMIT 1", (cohorts.POOL,))
+    busy = bool(last and last[0]["status"] in ("queued", "running"))
+    c1, c2 = st.columns([4, 1])
+    c1.caption(f"Score = trading (how often, how much ₹, how recently) + WebEngage app activity + Sarthi interest. App activity "
+               f"fetched for {n['fetched'] or 0:,} of {n['n'] or 0:,} clients" + (f", last {fmt(n['last'])}" if n["last"] else "")
+               + "; refreshed every night with the daily lists."
+               + (f" ⏳ {last[0]['step']}: {last[0]['fetched']:,} / {last[0]['to_fetch']:,}" if busy and last[0]["to_fetch"] else
+                  " ⏳ queued" if busy else ""))
+    if c2.button("Fetch app activity now", disabled=busy, width="stretch",
+                 help="Queued for the cohort worker, after any daily list being built: about 50 clients a minute."):
+        cohorts.queue(ctx, [cohorts.POOL], publish=True, requested_by=me_id if "me_id" in globals() else None)
+        st.rerun()
+
+
 def target_list() -> None:
     sm = act.summary(ctx)
     k = st.columns(5)
@@ -127,6 +224,7 @@ def target_list() -> None:
     st.caption(f"From trades: {sm['by_source']['trades']} · new clients: {sm['by_source']['new']} · from app use: "
                f"{sm['by_source']['app']} · from campaigns: {sm['by_source']['campaign']} · "
                + " · ".join(f"{act.CLIENT_TYPES[t]}: {n}" for t, n in sm["by_type"].items()))
+    pool_activity_line()
     with st.expander("Add to the list by file (when the client database can't be reached)"):
         st.markdown("**Traders with the Sarthi flag** (the Sarthi pool query's output: CLIENT_ID, TotalTrades, …, IsSarthiTIOn)")
         f1 = st.file_uploader("Upload", type=["xlsx", "xls", "csv"], key="up_traders")
@@ -176,12 +274,14 @@ def target_list() -> None:
     df = pd.DataFrame(data)
     f1, f2 = st.columns(2)
     types = f1.pills("Client type", list(act.CLIENT_TYPES.values()), selection_mode="multi", key="type_filter",
-                     help=f"New = joined in the last {s['new_days']} days (Admin: rules) · Resurrected = older clients trading again "
-                          f"only in the last {s['comeback_days']} days, or dormant · Active = the rest")
+                     help=f"New = joined in the last {s['new_days']} days (Admin: rules), then {s['new_days'] + 1}–{s['new_later_days']} days · "
+                          f"Pre-churn = older clients with no trade in {s['quiet_days']} days or trading much less lately · "
+                          "Existing = the rest")
     tiers = f2.multiselect("Priority", list(TIER_BADGE.values()))
     view = df[df["Client type"].isin(types)] if types else df
     view = view[view["Priority"].isin(tiers)] if tiers else view
-    st.caption(f"New clients get +{s['new_boost']:g} on the score and are handed out first: the Growth team's focus.")
+    st.caption(f"New clients get +{s['new_boost']:g} on the score (0–{s['new_days']} days) or +{s['new_later_boost']:g} "
+               f"({s['new_days'] + 1}–{s['new_later_days']} days) and are handed out first: the Growth team's focus.")
     st.dataframe(view, hide_index=True, width="stretch")
     st.download_button("Download the list (CSV)", view.to_csv(index=False).encode("utf-8"), "sarthi_targets.csv", "text/csv")
 
@@ -216,7 +316,7 @@ def drive_page() -> None:
     now_ = c3.toggle("Start now", value=True)
     c4, c5 = st.columns([3, 1])
     types = c4.multiselect("Client types", list(act.CLIENT_TYPES), default=list(act.CLIENT_TYPES), format_func=act.CLIENT_TYPES.get)
-    new_first = c5.toggle("New clients first", value=True, help="Hand out new clients, then resurrected, then active; "
+    new_first = c5.toggle("New clients first", value=True, help="Hand out new clients, then pre-churn, then existing; "
                                                                 "highest score first within each")
     if st.button("Start the drive", type="primary", disabled=not pick):
         res = act.start_drive(ctx, int(per), pick, tiers, start_now=now_, segments=types, new_first=new_first)
@@ -361,7 +461,9 @@ def my_calls(agent_id: str) -> None:
                 st.rerun()
 
 
-if page == "📊 Campaign report":
+if page == "📋 Cohort lists":
+    cohort_lists()
+elif page == "📊 Campaign report":
     report_page()
 elif page == "Target list":
     target_list()

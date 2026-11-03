@@ -279,6 +279,20 @@ CREATE TABLE IF NOT EXISTS we_ids (
     looked_up_at TEXT NOT NULL
 );
 
+-- Calls made from Jarvis (CRM tbl_CallLog), copied for the dashboard's clients (jarvis.py). A call of
+-- call_check.connect_seconds or more is a connect; incoming calls are kept but not counted as attempts.
+CREATE TABLE IF NOT EXISTS jarvis_calls (
+    id           INTEGER PRIMARY KEY,      -- tbl_CallLog.Id
+    client_id    TEXT NOT NULL,
+    started_at   TEXT NOT NULL,
+    duration     INTEGER NOT NULL DEFAULT 0, -- seconds
+    caller_id    INTEGER,
+    caller       TEXT,
+    incoming     INTEGER NOT NULL DEFAULT 0,
+    disposition  TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_jarvis_calls_client ON jarvis_calls(client_id, started_at);
+
 -- Daily cohort lists: pull from the client database, fetch app activity, score, publish as a list (cohorts.py).
 CREATE TABLE IF NOT EXISTS cohort_runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,

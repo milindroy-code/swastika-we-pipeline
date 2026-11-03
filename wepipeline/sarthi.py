@@ -112,6 +112,16 @@ def window_days(ctx: Ctx) -> int:
     return int(ctx.rules.get("registration_window_days") or ctx.cfg.get("registration_window_days") or 30)
 
 
+def later_window_days(ctx: Ctx) -> int:
+    """New and low-margin clients are also worked in a second bucket, window_days+1 .. this many days after registering."""
+    return max(int((ctx.cfg.get("cohorts") or {}).get("later_window_days", 90)), window_days(ctx))
+
+
+def age_bucket(ctx: Ctx, days: int | None) -> str:
+    """'' for 0..window_days (or unknown), '_90' for the later bucket."""
+    return "_90" if days is not None and days > window_days(ctx) else ""
+
+
 def money(amount: int | float) -> str:
     return f"₹{amount:,.0f}"
 

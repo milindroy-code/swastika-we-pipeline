@@ -133,6 +133,17 @@ def tick(ctx: Ctx) -> dict:
         except Exception as e:
             log.exception("Sarthi activation refresh failed")
             result["sarthi_pool"] = {"error": str(e)}
+    # Jarvis calls (CRM call log), every 15 minutes, before the re-score so call history counts in the priority
+    quarter = now.strftime("%Y-%m-%dT%H:") + f"{now.minute // 15 * 15:02d}"
+    if os.environ.get("CLIENT_DB_PULL") == "1" and not _ran(ctx, "jarvis_calls", quarter):
+        from .jarvis import sync_calls
+
+        try:
+            result["jarvis_calls"] = sync_calls(ctx)
+            _mark(ctx, "jarvis_calls", quarter)
+        except Exception as e:
+            log.exception("Jarvis call sync failed")
+            result["jarvis_calls"] = {"error": str(e)}
     result["sync"] = sync(ctx)
     from .market import due_for_refresh, refresh as refresh_market
 
@@ -163,12 +174,34 @@ def tick(ctx: Ctx) -> dict:
     return result
 
 
+def _watchdog(started: list, limit_s: int) -> None:
+    """A tick stuck on a network call (e.g. after the PC slept mid-query) is restarted: a fresh scheduler process
+    takes over and this one exits."""
+    import subprocess
+    import sys
+    import threading
+
+    def watch():
+        while True:
+            _time.sleep(30)
+            if started[0] and _time.monotonic() - started[0] > limit_s:
+                log.error("tick stuck for over %s s: restarting the scheduler", limit_s)
+                subprocess.Popen([sys.executable, *sys.argv], close_fds=True)
+                os._exit(3)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def loop(ctx: Ctx) -> None:
     interval = 60 * ctx.rules.get("sync_interval_minutes", 5)
     log.info("Scheduler started; running every %s s", interval)
+    started = [0.0]
+    _watchdog(started, int(os.environ.get("TICK_LIMIT_S", 1200)))
     while True:
+        started[0] = _time.monotonic()
         try:
             log.info("tick: %s", tick(ctx))
         except Exception:
             log.exception("tick failed")
+        started[0] = 0.0
         _time.sleep(interval)

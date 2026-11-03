@@ -127,7 +127,7 @@ def test_schedule_queues_the_fetch_and_the_publish_once_a_day(ctx):
     assert cohorts.schedule(ctx) == ["publish", "fetch"]  # 21:00: past both times today
     assert cohorts.schedule(ctx) == []
     queued = rows(ctx.conn, "SELECT cohort, publish FROM cohort_runs ORDER BY id")
-    assert [(r["cohort"], r["publish"]) for r in queued] == [(c, 1) for c in cohorts.COHORTS]  # the fetch isn't queued on top
+    assert [(r["cohort"], r["publish"]) for r in queued] == [(c, 1) for c in cohorts.COHORTS + cohorts.pool_runs()]  # no fetch on top
     ctx._now = datetime(2026, 10, 24, 9, 0, tzinfo=TZ)  # Saturday: no lists to publish
     assert cohorts.schedule(ctx) == []
 
@@ -266,3 +266,83 @@ def test_a_client_on_two_lists_is_worked_on_one(ctx):
 
     rank = {c: i for i, c in enumerate(CAMPAIGN_PRECEDENCE)}
     assert rank["payout"] < rank["sarthi_disabled"] < rank["low_margin"] < rank["new"] < rank["sarthi_off"]
+
+
+def test_the_sarthi_pool_is_fetched_after_the_lists_and_rescored(ctx, monkeypatch):
+    from wepipeline import drives
+
+    for cid in ("S1", "S2"):
+        ctx.conn.execute("INSERT INTO drive_members (program, lead_id, status, joined_at, updated_at) VALUES ('sarthi',?,'open',?,?)",
+                         (cid, NOW.isoformat(), NOW.isoformat()))
+    ctx.conn.commit()
+    monkeypatch.setattr(cohorts, "lookup_we_ids", lambda c, ids: {i: "W" + i for i in ids})
+    ctx.conn.execute("UPDATE drive_members SET segment='new' WHERE lead_id='S2'")
+    scored = []
+    monkeypatch.setattr(drives, "rescore", lambda c, key, cid: scored.append(cid))
+    api = FakeApi({"WS1": [ev("CALL_ACCEPTED_MOB", 1)]})
+    assert cohorts.queue(ctx, [cohorts.POOL]) == 4  # one run per client type
+    assert [r["cohort"] for r in rows(ctx.conn, "SELECT cohort FROM cohort_runs ORDER BY id")] == cohorts.pool_runs()
+    cohorts.work_once(ctx, api)  # new clients first...
+    assert [c[0] for c in api.calls] == ["WS2"] and scored == ["S2"]
+    cohorts.work_once(ctx, api)  # (31-90 days: nobody)
+    cohorts.work_once(ctx, api)  # ...then existing (S1 has no client type yet)
+    assert [c[0] for c in api.calls] == ["WS2", "WS1"] and scored == ["S2", "S1"]
+    run = one(ctx.conn, "SELECT status, upload_id FROM cohort_runs WHERE cohort=?", (cohorts.POOL + ":new",))
+    assert run["status"] == "ready" and run["upload_id"] is None  # not a list: nothing published
+
+
+def test_one_sarthi_cohort_can_be_fetched_and_rescored_on_its_own(ctx, monkeypatch):
+    from wepipeline import drives
+
+    for cid, seg in (("N1", "new"), ("N2", "new"), ("P1", "pre_churn")):
+        ctx.conn.execute("INSERT INTO drive_members (program, lead_id, status, segment, joined_at, updated_at) VALUES ('sarthi',?,'open',?,?,?)",
+                         (cid, seg, NOW.isoformat(), NOW.isoformat()))
+    ctx.conn.commit()
+    monkeypatch.setattr(cohorts, "lookup_we_ids", lambda c, ids: {i: "W" + i for i in ids})
+    scored = []
+    monkeypatch.setattr(drives, "rescore", lambda c, key, cid: scored.append(cid))
+    api = FakeApi({})
+    cohorts.queue(ctx, [cohorts.POOL + ":new"])
+    cohorts.work_once(ctx, api)
+    assert sorted(c[0] for c in api.calls) == ["WN1", "WN2"] and sorted(scored) == ["N1", "N2"]  # the pre-churn one isn't touched
+    cohorts.queue(ctx, [cohorts.POOL])
+    assert cohorts.queue(ctx, [cohorts.POOL + ":pre_churn"]) == 0  # already queued as part of the whole pool
+
+
+def test_sarthi_list_clients_show_their_insight(ctx):
+    from wepipeline.insights import customer_insight
+
+    for camp in ("sarthi_off", "sarthi_disabled"):
+        ctx.conn.execute("INSERT INTO leads (lead_id, we_user_id, status, category, source, extra, campaign, first_seen_at) "
+                         "VALUES (?,?,'open','x','s','{}',?,?)", (camp, camp, camp, NOW.isoformat()))
+        assert customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id=?", (camp,)))["stage"] == "sarthi activation"
+
+
+def test_daily_lists_go_before_the_sarthi_pool_and_a_pool_fetch_steps_aside(ctx, monkeypatch):
+    for i in range(3):
+        ctx.conn.execute("INSERT INTO drive_members (program, lead_id, status, segment, joined_at, updated_at) VALUES ('sarthi',?,'open','new',?,?)",
+                         (f"S{i}", NOW.isoformat(), NOW.isoformat()))
+    ctx.conn.commit()
+    monkeypatch.setattr(cohorts, "lookup_we_ids", lambda c, ids: {i: "W" + i for i in ids})
+    from wepipeline import drives
+    monkeypatch.setattr(drives, "rescore", lambda c, key, cid: None)
+    cohorts.queue(ctx, [cohorts.POOL + ":new"])
+    cohorts.queue(ctx, ["no_deposit"])
+    nxt = one(ctx.conn, "SELECT cohort FROM cohort_runs WHERE status='queued' ORDER BY CASE WHEN cohort LIKE 'sarthi_pool%' "
+                        "THEN 1 ELSE 0 END, publish DESC, id LIMIT 1")["cohort"]
+    assert nxt == "no_deposit"  # queued later, still first
+    ctx.conn.execute("UPDATE cohort_runs SET status='cancelled' WHERE cohort='no_deposit'")
+    clock = [0.0]
+
+    def tick():
+        clock[0] += 61  # a minute passes per call: the schedule check runs
+        return clock[0]
+
+    monkeypatch.setattr(cohorts.time, "monotonic", tick)
+    monkeypatch.setattr(cohorts, "schedule", lambda c: cohorts.queue(c, ["no_deposit"]))  # 08:30 arrives mid-fetch
+    api = FakeApi({})
+    api.s = {"lanes": 1, "page_size": 2000}
+    res = cohorts.work_once(ctx, api)
+    assert res["paused"] and res["fetched"] < 3  # stepped aside before finishing the cohort
+    run = one(ctx.conn, "SELECT status, step FROM cohort_runs WHERE cohort='sarthi_pool:new'")
+    assert run["status"] == "queued" and run["step"].startswith("Paused")

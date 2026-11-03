@@ -219,7 +219,8 @@ assignment:
 # in this order, and each list is published at publish_at (anyone not fetched in fresh_hours is topped up first).
 cohorts:
   enabled: true
-  cohorts: [no_deposit, low_margin, payout, sarthi_disabled, sarthi_off, reactivation]
+  cohorts: [no_deposit, no_deposit_90, low_margin, low_margin_90, payout, sarthi_disabled, sarthi_off, reactivation]
+  later_window_days: 90    # zero / low margin: a 0-30 day list and a 31-90 day list (registration_window_days below = 30)
   centralised_only: true
   lookback_days: 15        # first fetch for a client: this many days of activity; later fetches continue from the last one
   fresh_hours: 16          # morning publish: activity fetched within this many hours is not fetched again
@@ -239,6 +240,28 @@ cohorts:
 
 # Sarthi lists (Today's lists): switched Sarthi off within off_days and still off; and new clients (registered within
 # new_days) with Sarthi not switched on. A client is on one list only (upload.py CAMPAIGN_PRECEDENCE).
+# Calls: from Jarvis (CRM tbl_CallLog, synced every 15 min by the scheduler) and the dashboard's call log.
+# A Jarvis call of connect_seconds or more is a connect. "Call now?" in the lists and downloads uses these rules.
+call_check:
+  connect_seconds: 30
+  rest_after_connect_hours: 48   # connected, no callback agreed: rest this long
+  unanswered_attempts: 3         # this many unanswered in unanswered_window_hours: rest unanswered_rest_hours
+  unanswered_window_hours: 48
+  unanswered_rest_hours: 24
+  daily_cap: 2                   # attempts a day
+  weekly_cap: 6                  # attempts in 7 days
+# How the last 7 days of calls move the priority (heat) score; payouts are left alone.
+call_score:
+  fresh_bonus: 10                # not called this week: +10
+  enough_connects: 6             # 6+ connects and 10+ min talk this week: -40 (called enough, not a priority)
+  enough_talk_minutes: 10
+  called_enough: 40
+  some_connects: 3               # 3+ connects and 5+ min talk, still not funded: -15
+  some_talk_minutes: 5
+  some_talk: 15
+  hard_to_reach_attempts: 5      # 5+ calls this week, none connected: -10
+  hard_to_reach: 10
+
 sarthi_lists:
   off_days: 15
   new_days: 30

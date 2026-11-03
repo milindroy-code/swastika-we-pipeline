@@ -38,19 +38,20 @@ TRUTHY = {"1", "true", "y", "yes"}
 POOL_SQL = """
 WITH AllTrades AS
 (
-    SELECT CLIENT_ID, TRADE_DATE FROM [192.168.0.18].[Capsfo].[pms].[CLIENT_FIFO_Process]
+    SELECT CLIENT_ID, TRADE_DATE, ABS(ISNULL(Amount, 0)) AS Amount FROM [192.168.0.18].[Capsfo].[pms].[CLIENT_FIFO_Process]
     WHERE TRADE_DATE >= DATEADD(DAY, -{days}, GETDATE())
     UNION ALL
-    SELECT CLIENT_ID, TRADE_DATE FROM [192.168.0.18].[Capsfo].[pms].[FO_CLIENT_FIFO_Process]
+    SELECT CLIENT_ID, TRADE_DATE, ABS(ISNULL(Amount, 0)) AS Amount FROM [192.168.0.18].[Capsfo].[pms].[FO_CLIENT_FIFO_Process]
     WHERE TRADE_DATE >= DATEADD(DAY, -{days}, GETDATE())
 ),
 ClientActivity AS
 (
     SELECT CLIENT_ID, COUNT(*) AS TotalTrades, COUNT(DISTINCT CAST(TRADE_DATE AS DATE)) AS ActiveTradingDays,
-           MIN(TRADE_DATE) AS FirstTradeInPeriod, MAX(TRADE_DATE) AS LastTradeDate
+           MIN(TRADE_DATE) AS FirstTradeInPeriod, MAX(TRADE_DATE) AS LastTradeDate, SUM(Amount) AS Turnover,
+           SUM(CASE WHEN TRADE_DATE >= DATEADD(DAY, -{recent_days}, GETDATE()) THEN 1 ELSE 0 END) AS RecentTrades
     FROM AllTrades GROUP BY CLIENT_ID
 )
-SELECT A.CLIENT_ID, A.TotalTrades, A.ActiveTradingDays, A.FirstTradeInPeriod, A.LastTradeDate,
+SELECT A.CLIENT_ID, A.TotalTrades, A.ActiveTradingDays, A.FirstTradeInPeriod, A.LastTradeDate, A.Turnover, A.RecentTrades,
        CASE WHEN A.TotalTrades >= 100 THEN 'Very High' WHEN A.TotalTrades >= 50 THEN 'High' WHEN A.TotalTrades >= 20 THEN 'Medium'
             WHEN A.TotalTrades >= 5 THEN 'Low' ELSE 'Very Low' END AS ActivityBucket,
        C.IsSarthiTIOn, C.SarthiActivationDate, C.PreferredSegment, C.IsAccountClosed, C.REGISTRATION_DATE
@@ -100,11 +101,15 @@ def settings(ctx: Ctx) -> dict:
         "refresh_hours": float(cfg.get("refresh_hours", 24)),
         "max_attempts": int(cfg.get("max_attempts", 3)),
         "results_days": int(cfg.get("results_days", 120)),
-        # client types: new = registered within the Growth team's window (Admin: rules), resurrected = an older client whose
-        # trading restarted recently (first trade of the window within `comeback_days`) or a dormant / re-activation client
+        # client types: new = registered within the Growth team's window (Admin: rules); pre-churn = an older client going
+        # quiet: no trade in `quiet_days`, or trades in the last `recent_days` down to `drop_share` of the earlier part of the
+        # window (at least `drop_min_trades` before); existing = everyone else
         "new_days": int(ctx.rules.get("registration_window_days") or ctx.cfg.get("registration_window_days") or 30),
-        "comeback_days": int(cfg.get("comeback_days", 30)),
+        "quiet_days": int(cfg.get("quiet_days", 21)), "recent_days": int(cfg.get("recent_days", 30)),
+        "drop_share": float(cfg.get("drop_share", 0.3)), "drop_min_trades": int(cfg.get("drop_min_trades", 5)),
         "new_boost": float(cfg.get("new_client_boost", 15)),
+        "new_later_days": int(cfg.get("new_later_days", 90)),   # second new cohort: joined new_days+1 .. new_later_days ago
+        "new_later_boost": float(cfg.get("new_later_boost", 8)),
         "score": {**SCORE_DEFAULTS, **(cfg.get("score") or {})},
         "engagement": {**drives.ENGAGEMENT_DEFAULTS, **(cfg.get("engagement") or {})},
     }
@@ -160,9 +165,12 @@ def sarthi_score(ctx: Ctx, extra: dict, app_heat: float = 0, user_id: str | None
     a = extra.get("sarthi") or {}
     fresh = extra.get("sarthi_new") or {}
     reg = parse_dt(a.get("registered") or fresh.get("registered") or extra.get("registration_date"), ctx.tz)
-    new = bool(reg and (ctx.now().date() - reg.date()).days <= s["new_days"])
+    age = (ctx.now().date() - reg.date()).days if reg else None
+    new = age is not None and age <= s["new_days"]
     if new:  # focus on new clients: joined within the window
         score = round(min(score + s["new_boost"], 100), 1)
+    elif age is not None and age <= s["new_later_days"]:  # joined 1-3 months ago: still new, a smaller boost
+        score = round(min(score + s["new_later_boost"], 100), 1)
     if new and fresh.get("first_deposit"):
         score = round(min(score + 5, 100), 1)  # funded new client: ready to use Sarthi's ideas straight away
     bits = [b for b in ((f"new client (joined {reg:%d %b}" + (f", deposited ₹{fresh['first_deposit']:,.0f}" if fresh.get("first_deposit") else "")
@@ -184,23 +192,30 @@ def _status(r: dict, c: dict) -> dict:
             "registered": r.get(c["reg"]) if c.get("reg") else None}
 
 
-CLIENT_TYPES = {"new": "🆕 New (joined recently)", "active": "📈 Active", "resurrected": "♻️ Resurrected (came back)"}
+CLIENT_TYPES = {"new": "🆕 New (0–30 days)", "new_later": "🌱 New (31–90 days)", "active": "📈 Existing",
+                "pre_churn": "⚠️ Pre-churn (going quiet)"}
+TYPE_ORDER = ["new", "new_later", "pre_churn", "active"]  # hand-out order: newest first, then slipping away, then the rest
 
 
 def client_type(ctx: Ctx, lead: dict) -> str:
-    """new: registered within the window · resurrected: older and trading again only recently, or dormant / on the
-    re-activation list · active: everyone else."""
+    """new: registered within new_days · new_later: within new_later_days · pre_churn: older and going quiet (no trade in quiet_days, or recent trades
+    down to drop_share of before, or dormant in the client database) · active (shown as Existing): everyone else."""
     s = settings(ctx)
     extra = json.loads(lead.get("extra") or "{}")
     a = extra.get("sarthi") or {}
     reg = parse_dt(a.get("registered") or (extra.get("sarthi_new") or {}).get("registered") or extra.get("registration_date"), ctx.tz)
     if reg and (ctx.now().date() - reg.date()).days <= s["new_days"]:
         return "new"
-    first = parse_dt(a.get("first_trade"), ctx.tz)
-    if first and (ctx.now().date() - first.date()).days <= s["comeback_days"] and int(a.get("window_days") or 60) > s["comeback_days"]:
-        return "resurrected"  # no trade in the earlier part of the window: they came back
+    if reg and (ctx.now().date() - reg.date()).days <= s["new_later_days"]:
+        return "new_later"
+    last = parse_dt(a.get("last_trade") or extra.get("last_trade_date"), ctx.tz)
+    if last and (ctx.now().date() - last.date()).days > s["quiet_days"]:
+        return "pre_churn"
+    total, recent = int(a.get("total_trades") or 0), a.get("recent_trades")
+    if recent is not None and total - int(recent) >= s["drop_min_trades"] and int(recent) <= s["drop_share"] * (total - int(recent)):
+        return "pre_churn"  # trading fell sharply in the last few weeks
     if (lead.get("category") or "").startswith("Traded - dormant") or lead.get("campaign") == "reactivation":
-        return "resurrected"
+        return "pre_churn"
     return "active"
 
 
@@ -349,7 +364,8 @@ def load_new(ctx: Ctx, df: pd.DataFrame, source: str = "client DB") -> dict:
 
 def pull_new(ctx: Ctx) -> pd.DataFrame:
     src = (ctx.cfg.get("sources") or {}).get("client_db") or {}
-    return drives.query(ctx, (src.get("sarthi_new_query") or NEW_SQL).format(days=settings(ctx)["new_days"]))
+    s = settings(ctx)  # both new cohorts: everyone who joined within new_later_days
+    return drives.query(ctx, (src.get("sarthi_new_query") or NEW_SQL).format(days=max(s["new_days"], s["new_later_days"])))
 
 
 def app_user_status(ctx: Ctx) -> pd.DataFrame:
@@ -400,7 +416,8 @@ def channel_report(ctx: Ctx) -> list[dict]:
 # ---------------------------------------------------------------- refresh
 def pull_pool(ctx: Ctx) -> pd.DataFrame:
     src = (ctx.cfg.get("sources") or {}).get("client_db") or {}
-    return drives.query(ctx, (src.get("sarthi_pool_query") or POOL_SQL).format(days=settings(ctx)["days"]))
+    s = settings(ctx)
+    return drives.query(ctx, (src.get("sarthi_pool_query") or POOL_SQL).format(days=s["days"], recent_days=s["recent_days"]))
 
 
 def pull_activations(ctx: Ctx) -> pd.DataFrame:
@@ -512,6 +529,48 @@ def report(ctx: Ctx, campaign_id: int) -> dict:
                              "switched_on": sum(1 for w in credited if (w.get("segment") or "active") == ty)} for ty in CLIENT_TYPES}}
 
 
+def cohort_rows(ctx: Ctx, segment: str | None = None) -> list[dict]:
+    """The Sarthi pool (or one client type) as a list to download: who, type, score, trading, app activity, GM, why."""
+    from .heat import TIER_BADGE
+
+    out = []
+    for m in rows(ctx.conn, """SELECT m.*, l.name, l.extra, w.fetched_at AS app_fetched, w.events AS app_events,
+                                      (SELECT MAX(event_time) FROM events e WHERE e.user_id = m.lead_id) AS last_active
+                               FROM drive_members m LEFT JOIN leads l ON l.lead_id = m.lead_id
+                               LEFT JOIN we_fetch w ON w.client_id = m.lead_id
+                               WHERE m.program=? AND m.status='open'""" + (" AND COALESCE(m.segment,'active')=?" if segment else "")
+                   + " ORDER BY m.heat_score DESC", (CAMPAIGN, segment) if segment else (CAMPAIGN,)):
+        x = json.loads(m["extra"] or "{}")
+        a, fresh = x.get("sarthi") or {}, x.get("sarthi_new") or {}
+        reg = parse_dt(a.get("registered") or fresh.get("registered") or x.get("registration_date"), ctx.tz)
+        last_trade = parse_dt(a.get("last_trade") or x.get("last_trade_date"), ctx.tz)
+        last_active = parse_dt(m["last_active"], ctx.tz)
+        out.append({
+            "Client code": m["lead_id"], "Name": m["name"] or "", "Client type": CLIENT_TYPES.get(m["segment"] or "active", ""),
+            "Priority": TIER_BADGE.get(m["heat_tier"] or "cold", ""), "Heat score": round(m["heat_score"] or 0, 1),
+            "Registered": f"{reg:%d %b %Y}" if reg else "", "Trades (window)": a.get("total_trades"),
+            "Active trading days": a.get("active_days"), "Traded ₹": round(a["turnover"]) if a.get("turnover") else None,
+            "Last trade": f"{last_trade:%d %b %Y}" if last_trade else "",
+            "App activity fetched": f"{parse_dt(m['app_fetched'], ctx.tz):%d %b %H:%M}" if m["app_fetched"] else "not yet",
+            "App events": m["app_events"], "Last active in app": f"{last_active:%d %b %H:%M}" if last_active else "",
+            "GM": m["assigned_to"] or "", "Why (score drivers)": m["heat_reasons"] or ""})
+    return out
+
+
+def cohort_status(ctx: Ctx) -> dict[str, dict]:
+    """Per client type: clients, app activity fetched, tiers and when scored: the three steps on the Cohort lists page."""
+    out = {t: {"clients": 0, "fetched": 0, "hot": 0, "warm": 0, "cold": 0, "scored": None} for t in CLIENT_TYPES}
+    for r in rows(ctx.conn, """SELECT COALESCE(m.segment,'active') AS seg, m.heat_tier, m.updated_at, w.client_id AS f
+                               FROM drive_members m LEFT JOIN we_fetch w ON w.client_id = m.lead_id
+                               WHERE m.program=? AND m.status='open'""", (CAMPAIGN,)):
+        d = out.setdefault(r["seg"], {"clients": 0, "fetched": 0, "hot": 0, "warm": 0, "cold": 0, "scored": None})
+        d["clients"] += 1
+        d["fetched"] += 1 if r["f"] else 0
+        d[r["heat_tier"] or "cold"] += 1
+        d["scored"] = max(filter(None, [d["scored"], r["updated_at"]]), default=None)
+    return out
+
+
 def summary(ctx: Ctx) -> dict:
     pool = rows(ctx.conn, "SELECT m.heat_tier, m.assigned_to, m.segment, l.extra FROM drive_members m LEFT JOIN leads l ON l.lead_id=m.lead_id "
                           "WHERE m.program=? AND m.status='open'", (CAMPAIGN,))
@@ -537,4 +596,5 @@ PROGRAM = drives.register(drives.Program(
                              "Show them what Sarthi sends and switch it on with them on the call."),
     success_outcome="activated",
     segment=client_type,
+    segment_order=TYPE_ORDER,
 ))

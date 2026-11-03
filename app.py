@@ -992,7 +992,8 @@ def history_score_section() -> None:
                        f"apply when they're uploaded. Open clients now: 🔥 {t['hot']:,} · 🌤️ {t['warm']:,} · ❄️ {t['cold']:,}.")
 
 
-COHORT_TITLES = {"no_deposit": "New clients without deposit", "low_margin": "New clients with low margin",
+COHORT_TITLES = {"no_deposit": "Zero margin · 0–30 days", "no_deposit_90": "Zero margin · 31–90 days",
+                 "low_margin": "Low margin · 0–30 days", "low_margin_90": "Low margin · 31–90 days",
                  "payout": "Clients who made payouts", "sarthi_disabled": "Switched Sarthi off (15 days)",
                  "sarthi_off": "New clients, Sarthi not on", "reactivation": "Churned clients"}
 
@@ -1163,6 +1164,7 @@ def upload_section() -> None:
                + (f" · {s['closed']} already closed (converted / not interested)" if s.get("closed") else ""))
     view = pd.DataFrame([{"Rank": r["batch_rank"], "Priority": r["priority"], "Heat": r["heat"], "Client code": r["client"],
                           "List": r["list"], "Category": r["category"], "GM": r["gm"], "First call due": r["next_due"], "Best time": r["best_time"],
+                          "Calls (7 d)": r.get("calls_7d", ""), "Calls (48 h)": r.get("calls_48h", ""), "Call now?": r.get("call_now", ""),
                           "Why": (r["levers"].split("\n")[0].lstrip("• ") if r["levers"] else ""),
                           "Top call idea": (r["call_ideas"][0]["fact"] + " → " + r["call_ideas"][0]["angle"]) if r.get("call_ideas") else ""}
                          for r in data])

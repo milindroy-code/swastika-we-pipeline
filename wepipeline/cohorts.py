@@ -29,8 +29,27 @@ from .db import one, rows
 
 log = logging.getLogger(__name__)
 
-COHORTS = ["no_deposit", "low_margin", "payout", "sarthi_disabled", "sarthi_off", "reactivation"]  # fetch / publish order
-DEFAULTS = {"enabled": True, "cohorts": COHORTS, "centralised_only": True, "lookback_days": 15, "fresh_hours": 16, "refetch_after_hours": 4,
+COHORTS = ["no_deposit", "no_deposit_90", "low_margin", "low_margin_90", "payout", "sarthi_disabled", "sarthi_off",
+           "reactivation"]  # fetch / publish order
+AGED = {"no_deposit_90": "no_deposit", "low_margin_90": "low_margin"}  # the 31-90 day bucket of a list type
+
+
+def list_type_of(cohort: str) -> str:
+    return AGED.get(cohort, cohort)
+POOL = "sarthi_pool"  # not a list: the Sarthi activation pool's WebEngage activity, fetched after the lists, then re-scored
+
+
+POOL_ORDER = ["new", "new_later", "active", "pre_churn"]  # the pool is fetched one client type at a time, in this order
+
+
+def pool_runs() -> list[str]:
+    return [f"{POOL}:{t}" for t in POOL_ORDER]
+
+
+def is_pool(cohort: str) -> bool:
+    """The whole Sarthi pool, or one of its client types ("sarthi_pool:new", "sarthi_pool:pre_churn", ...)."""
+    return cohort == POOL or cohort.startswith(POOL + ":")
+DEFAULTS = {"enabled": True, "cohorts": COHORTS, "extra_fetch": [POOL], "centralised_only": True, "lookback_days": 15, "fresh_hours": 16, "refetch_after_hours": 4,
             "fetch_at": "20:00", "publish_at": "08:30", "publish_on_holidays": False,
             "night_only": ["reactivation"]}  # fetched only by the overnight run; daytime runs score what is already fetched
 API_DEFAULTS = {"host": "https://dashboard.in.webengage.com", "account": "in~~991992ab", "lanes": 2, "max_per_minute": 30,
@@ -137,6 +156,15 @@ class Api:
         self.headers = {"Accept": "application/json", "User-Agent": "growth-dashboards/1.0", "Authorization": f"Bearer {key}"}
         self.sleep, self._next, self.calls, self.slowdown = sleep, 0.0, 0, 1.0
         self._lock = threading.Lock()
+        self._ssl = None
+        try:  # Windows' own certificate store (what the browser trusts), e.g. behind an office network's HTTPS inspection
+            import ssl
+
+            import truststore
+
+            self._ssl = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except ImportError:
+            pass
 
     def _interval(self) -> float:
         return 60.0 / float(self.s.get("max_per_minute", 30)) * self.slowdown
@@ -159,16 +187,17 @@ class Api:
         for attempt in range(6):
             self._wait_turn()
             try:
-                with urllib.request.urlopen(urllib.request.Request(url, headers=self.headers), timeout=60) as r:
+                with urllib.request.urlopen(urllib.request.Request(url, headers=self.headers), timeout=60, context=self._ssl) as r:
                     return json.loads(r.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 if e.code not in (429, 500, 502, 503, 504):
                     raise RuntimeError(f"WebEngage HTTP {e.code}: {e.read()[:200]!r}") from None
                 self._brake()
-                wait = int(e.headers.get("Retry-After") or 30 * 2 ** attempt)
+                wait = min(int(e.headers.get("Retry-After") or 30 * 2 ** attempt), 300)
                 log.warning("WebEngage HTTP %s, waiting %ss", e.code, wait)
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:  # network drop: wait, then retry
-                wait = 30 * 2 ** attempt
+            except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError) as e:  # network drop (e.g. just after waking),
+                # or a page that isn't JSON (a half-read reply, a Wi-Fi login page): retry soon
+                wait = min(15 * 2 ** attempt, 120)
                 log.warning("WebEngage unreachable (%s), waiting %ss", e, wait)
             self.sleep(wait)
         raise RuntimeError("WebEngage did not answer after 6 tries")
@@ -270,7 +299,29 @@ def needs_fetch(ctx: Ctx, client_ids: list[str], since: datetime | None = None) 
 def pull_cohort(ctx: Ctx, cohort: str) -> pd.DataFrame:
     from .clientdb import pull_list
 
-    df = pull_list(ctx, cohort)
+    if is_pool(cohort):  # the Sarthi activation pool (or one client type of it), highest score first
+        seg = cohort.partition(":")[2]
+        others = [t for t in POOL_ORDER if t != "active"]
+        if seg == "active":  # existing clients, and anyone with an old or no client type
+            where, args = f"AND COALESCE(segment,'active') NOT IN ({','.join('?' * len(others))}) ", tuple(others)
+        elif seg:
+            where, args = "AND segment=? ", (seg,)
+        else:
+            where, args = "", ()
+        ids = [r["lead_id"] for r in rows(ctx.conn, "SELECT lead_id FROM drive_members WHERE program='sarthi' AND status='open' "
+                                                    + where + "ORDER BY heat_score DESC", args)]
+        return pd.DataFrame({"CLIENT_ID": ids, "IsCentralized": [1] * len(ids)})
+
+    from .sarthi import later_window_days, window_days
+
+    base = list_type_of(cohort)
+    if base in ("no_deposit", "low_margin"):  # 0-30 or 31-90 days since registration
+        df = pull_list(ctx, base, later_window_days(ctx) if cohort in AGED else None)
+        days = pd.to_numeric(df.get("DaysSinceRegistration"), errors="coerce") if "DaysSinceRegistration" in df else None
+        if days is not None:
+            df = df[days > window_days(ctx)] if cohort in AGED else df[~(days > window_days(ctx))]
+    else:
+        df = pull_list(ctx, cohort)
     if settings(ctx)["centralised_only"] and "IsCentralized" in df:
         df = df[df["IsCentralized"].fillna(0).astype(int) == 1]
     return df.reset_index(drop=True)
@@ -279,14 +330,15 @@ def pull_cohort(ctx: Ctx, cohort: str) -> pd.DataFrame:
 def _list_file(ctx: Ctx, cohort: str, df: pd.DataFrame) -> Path:
     """The cohort as an uploadable list: client codes plus the amounts the pitch uses (payout, first deposit)."""
     out = pd.DataFrame({"Client code": df["CLIENT_ID"]})
+    cohort = list_type_of(cohort)
     if cohort == "payout":
         out["Payout amount"] = df.get("PayoutAmount")
         out["Payout date"] = df.get("LastPayoutDate")
     if cohort == "low_margin":
-        out["Current margin"] = df.get("FirstDeposit")
+        out["Current margin"] = df["TotalPayIns"] if "TotalPayIns" in df else df.get("FirstDeposit")  # funded so far, not the first deposit
     folder = ctx.path("data/uploads")
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{ctx.now():%Y%m%d_%H%M%S}_morning_{cohort}.csv"
+    path = folder / f"{ctx.now():%Y%m%d_%H%M%S}_morning_{cohort}.csv"  # (the cohort key, e.g. no_deposit_90)
     out.to_csv(path, index=False, encoding="utf-8-sig")
     return path
 
@@ -313,7 +365,7 @@ def run_cohort(ctx: Ctx, run: dict, api: Api | None = None) -> dict:
     # tops up clients new to the list (or not fetched within fresh_hours)
     since = None if run["publish"] else parse_dt(run["requested_at"], ctx.tz) - timedelta(hours=float(settings(ctx)["refetch_after_hours"]))
     todo = needs_fetch(ctx, [c for c in ids if c in we], since)
-    if run["publish"] and cohort in settings(ctx)["night_only"] and _others_busy(ctx, cohort):
+    if run["publish"] and (cohort in settings(ctx)["night_only"] or is_pool(cohort)) and _others_busy(ctx, cohort):
         todo = []  # the other lists come first: this one is scored with what's fetched and fetched once they're done
     _update(ctx, rid, step="Fetching app activity", no_we_id=len(ids) - len(we), to_fetch=len(todo), fetched=0)
     api = api or Api(ctx)
@@ -328,13 +380,25 @@ def run_cohort(ctx: Ctx, run: dict, api: Api | None = None) -> dict:
         except RuntimeError as e:
             return cid, [], str(e)[:300]
 
+    last_check, paused = time.monotonic(), False
     with ThreadPoolExecutor(max_workers=lanes) as pool:
         queue, running, n = list(todo), set(), 0
         while queue or running:
+            if time.monotonic() - last_check > 60:  # every minute: is it time for the morning lists?
+                last_check = time.monotonic()
+                try:
+                    schedule(ctx)
+                except Exception:
+                    log.exception("schedule check during a fetch failed")
+                if is_pool(cohort) and queue and _lists_waiting(ctx):
+                    queue.clear()  # finish the calls in flight, then step aside (fetched clients are kept)
+                    paused = True
+            if not queue and not running:
+                break
             while queue and len(running) < lanes * 2:  # a small look-ahead, so a lane never waits on the database
                 cid = queue.pop(0)
                 running.add(pool.submit(call, cid, _fetch_start(ctx, cid, we[cid]), ctx.now()))
-            done, running = wait(running, return_when=FIRST_COMPLETED)
+            done, running = wait(running, timeout=30, return_when=FIRST_COMPLETED)  # wake up for the time check too
             for f in done:
                 cid, events, error = f.result()
                 _retry_locked(ctx, _save_fetch, ctx, cid, we[cid], events, error)
@@ -348,12 +412,37 @@ def run_cohort(ctx: Ctx, run: dict, api: Api | None = None) -> dict:
                 for f in running:
                     f.cancel()
                 raise RuntimeError(f"Stopped: {failed} of {n} activity fetches failed (last: see the cohort log)")
+    if paused:
+        _update(ctx, rid, status="queued", step="Paused for the daily lists: continues after them", fetched=n)
+        log.info("%s paused after %s clients: daily lists first", cohort, n)
+        return {"paused": True, "fetched": n}
     result = {"clients": len(ids), "we_ids": len(we), "fetched": len(todo), "failed": failed}
-    if run["publish"] and ids:
+    if is_pool(cohort):  # not a list: re-score these pool clients with the fresh app activity
+        from . import activation  # noqa: F401  (registers the Sarthi program)
+        from .drives import refresh_scores, rescore
+
+        _update(ctx, rid, step="Calculating heat scores")
+        if cohort == POOL:
+            result["rescored"] = _retry_locked(ctx, lambda: refresh_scores(ctx, "sarthi"), tries=4)
+        else:
+            def rescore_these():
+                for cid in ids:
+                    rescore(ctx, "sarthi", cid)
+                ctx.conn.commit()
+                return len(ids)
+
+            result["rescored"] = _retry_locked(ctx, rescore_these, tries=4)
+    elif run["publish"] and ids:
         _update(ctx, rid, step="Scoring and ranking")
         path = _list_file(ctx, cohort, df)
-        summary = _retry_locked(ctx, lambda: analyse_upload(ctx, path, uploaded_by="system", use_client_db=True, list_type=cohort),
-                                tries=4)
+        try:  # the latest Jarvis calls, so the list's scores and Call now? know who was just called
+            from .jarvis import sync_calls
+
+            _retry_locked(ctx, lambda: sync_calls(ctx), tries=4)
+        except Exception as e:
+            log.warning("Jarvis call sync before scoring skipped: %s", e)
+        summary = _retry_locked(ctx, lambda: analyse_upload(ctx, path, uploaded_by="system", use_client_db=True,
+                                                            list_type=list_type_of(cohort)), tries=4)
         if summary.get("error"):
             raise RuntimeError(summary["error"])
         result["upload_id"] = summary["upload_id"]
@@ -364,9 +453,16 @@ def run_cohort(ctx: Ctx, run: dict, api: Api | None = None) -> dict:
     return result
 
 
+def _lists_waiting(ctx: Ctx) -> bool:
+    """A daily list (not a Sarthi pool run) is queued to be built."""
+    return bool(one(ctx.conn, f"SELECT 1 FROM cohort_runs WHERE status='queued' AND publish=1 AND cohort NOT LIKE '{POOL}%'"))
+
+
 def _others_busy(ctx: Ctx, cohort: str) -> bool:
     """Another cohort's list is still waiting or being built (a night-only cohort fetches only after them)."""
-    return bool(one(ctx.conn, "SELECT 1 FROM cohort_runs WHERE cohort<>? AND publish=1 AND status IN ('queued','running')", (cohort,)))
+    # pool runs wait for the daily lists only, not for each other (they run one after another anyway)
+    return bool(one(ctx.conn, "SELECT 1 FROM cohort_runs WHERE cohort<>? AND publish=1 AND status IN ('queued','running')"
+                              + (f" AND cohort NOT LIKE '{POOL}%'" if is_pool(cohort) else ""), (cohort,)))
 
 
 # ---------------------------------------------------------------- the daily email
@@ -375,7 +471,8 @@ def _ready_today(ctx: Ctx, cohort: str) -> dict | None:
                          "AND finished_at>=? ORDER BY id DESC LIMIT 1", (cohort, ctx.today().isoformat()))
 
 
-TITLES = {"no_deposit": "New clients without deposit", "low_margin": "New clients with low margin",
+TITLES = {"no_deposit": "Zero margin · 0–30 days", "no_deposit_90": "Zero margin · 31–90 days",
+          "low_margin": "Low margin · 0–30 days", "low_margin_90": "Low margin · 31–90 days",
           "sarthi_disabled": "Switched Sarthi off (last 15 days)", "sarthi_off": "New clients with Sarthi not on",
           "payout": "Clients who made payouts", "reactivation": "Churned clients"}
 
@@ -450,11 +547,15 @@ def send_list_reports(ctx: Ctx) -> list[str]:
 
 # ---------------------------------------------------------------- queue + schedule
 def queue(ctx: Ctx, cohorts: list[str], publish: bool = True, requested_by: str | None = None) -> int:
-    """Ask the worker to run these cohorts (skips one already queued or running)."""
+    """Ask the worker to run these cohorts (skips one already queued or running). The whole Sarthi pool becomes one run
+    per client type, in POOL_ORDER, so each type is fetched and scored before the next starts."""
     added = 0
+    cohorts = [x for c in cohorts for x in (pool_runs() if c == POOL else [c])]
     for c in cohorts:
         if one(ctx.conn, "SELECT 1 FROM cohort_runs WHERE cohort=? AND publish>=? AND status IN ('queued','running')", (c, int(publish))):
             continue
+        if c.startswith(POOL + ":") and one(ctx.conn, "SELECT 1 FROM cohort_runs WHERE cohort=? AND status IN ('queued','running')", (POOL,)):
+            continue  # the whole pool is already being fetched
         ctx.conn.execute("INSERT INTO cohort_runs (cohort, publish, status, step, requested_by, requested_at) VALUES (?,?,?,?,?,?)",
                          (c, int(publish), "queued", "Waiting to start", requested_by, iso(ctx.now())))
         added += 1
@@ -488,11 +589,11 @@ def schedule(ctx: Ctx) -> list[str]:
         return done
     if now >= _at(ctx, s["publish_at"]) and not _ran(ctx, "cohort_publish", today):
         if ctx.is_working_day(today) or s["publish_on_holidays"]:
-            queue(ctx, s["cohorts"], publish=True, requested_by="schedule")
+            queue(ctx, s["cohorts"] + list(s["extra_fetch"]), publish=True, requested_by="schedule")
             done.append("publish")
         _mark(ctx, "cohort_publish", today)
     if now >= _at(ctx, s["fetch_at"]) and not _ran(ctx, "cohort_fetch", today):
-        queue(ctx, s["cohorts"], publish=False, requested_by="schedule")
+        queue(ctx, s["cohorts"] + list(s["extra_fetch"]), publish=False, requested_by="schedule")
         _mark(ctx, "cohort_fetch", today)
         done.append("fetch")
     return done
@@ -500,7 +601,9 @@ def schedule(ctx: Ctx) -> list[str]:
 
 def work_once(ctx: Ctx, api: Api | None = None) -> dict | None:
     """Run the oldest queued cohort (publish runs before overnight fetches)."""
-    run = one(ctx.conn, "SELECT * FROM cohort_runs WHERE status='queued' ORDER BY publish DESC, id LIMIT 1")
+    # the daily lists first, then the Sarthi pool; publish runs before overnight fetch-only ones
+    run = one(ctx.conn, "SELECT * FROM cohort_runs WHERE status='queued' "
+                        "ORDER BY CASE WHEN cohort LIKE '{POOL}%' THEN 1 ELSE 0 END, publish DESC, id LIMIT 1".replace("{POOL}", POOL))
     if not run:
         return None
     try:

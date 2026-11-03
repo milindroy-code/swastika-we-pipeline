@@ -243,9 +243,17 @@ def trade_data(ctx: Ctx, r: dict, c: dict, days: int, source: str) -> dict:
         bucket = ("Very High" if trades >= 100 else "High" if trades >= 50 else "Medium" if trades >= 20
                   else "Low" if trades >= 5 else "Very Low")
     last = parse_dt(r.get(c["last"]), ctx.tz) if c["last"] else None
-    return {"total_trades": trades, "active_days": _int(r.get(c["days"])) if c["days"] else 0, "last_trade": iso(last),
-            "first_trade": iso(parse_dt(r.get(c["first"]), ctx.tz)) if c.get("first") else None,
-            "bucket": bucket, "window_days": days, "pulled_at": iso(ctx.now()), "source": source}
+    out = {"total_trades": trades, "active_days": _int(r.get(c["days"])) if c["days"] else 0, "last_trade": iso(last),
+           "first_trade": iso(parse_dt(r.get(c["first"]), ctx.tz)) if c.get("first") else None,
+           "bucket": bucket, "window_days": days, "pulled_at": iso(ctx.now()), "source": source}
+    for key, names in (("turnover", ("Turnover", "TradedValue")), ("recent_trades", ("RecentTrades",))):
+        v = next((r[n] for n in names if n in r and r[n] is not None and str(r[n]).strip() not in {"", "nan", "None"}), None)
+        if v is not None:  # the Sarthi pool query adds traded value and the last weeks' trade count
+            try:
+                out[key] = float(v) if key == "turnover" else int(float(v))
+            except (TypeError, ValueError):
+                pass
+    return out
 
 
 QUALITY_DEFAULTS = {"high_deposit": 30000, "high_holdings": 100000, "high_recent_days": 30,

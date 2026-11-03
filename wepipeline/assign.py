@@ -35,7 +35,8 @@ def pick_caller(ctx: Ctx, category: str, load: dict[str, int], payout: bool = Fa
 
 
 # ---------------------------------------------------------------- each GM's plan for the day
-PLAN_LISTS = {"no_deposit": "New clients without deposit", "low_margin": "Low margin clients", "payout": "Payout customers",
+PLAN_LISTS = {"no_deposit": "Zero margin · 0–30 days", "no_deposit_90": "Zero margin · 31–90 days",
+              "low_margin": "Low margin · 0–30 days", "low_margin_90": "Low margin · 31–90 days", "payout": "Payout customers",
               "sarthi_disabled": "Switched Sarthi off (15 days)", "sarthi_off": "Sarthi not on (new clients)",
               "reactivation": "Churned customers"}
 PLAN_TIERS = {"hot": "🔥 Hot", "warm": "🌤️ Warm", "cold": "❄️ Cold"}
@@ -49,10 +50,28 @@ def list_key(campaign: str | None) -> str:
             "sarthi_off": "sarthi_off"}.get(campaign or "", "no_deposit")
 
 
+def lead_list(ctx: Ctx, lead: dict) -> str:
+    """The plan cohort a client sits in: their list, and for zero / low margin the age bucket (0-30 or 31-90 days)."""
+    import json
+
+    from .sarthi import age_bucket
+
+    k = list_key(lead.get("campaign"))
+    if k not in ("no_deposit", "low_margin"):
+        return k
+    extra = lead.get("extra")
+    extra = json.loads(extra) if isinstance(extra, str) and extra else (extra or {})
+    days = extra.get("days_since_registration")
+    if days is None:
+        reg = parse_dt(extra.get("registration_date"), ctx.tz)
+        days = (ctx.now().date() - reg.date()).days if reg else None
+    return k + age_bucket(ctx, int(days) if days is not None else None)
+
+
 def plan_accepts(plan: dict, lead: dict, taken_today: int) -> bool:
     if plan.get("new_clients") is not None and taken_today >= int(plan["new_clients"]):
         return False
-    return list_key(lead.get("campaign")) in plan["lists"] and (lead.get("heat_tier") or "cold") in plan["tiers"]
+    return lead.get("_list", list_key(lead.get("campaign"))) in plan["lists"] and (lead.get("heat_tier") or "cold") in plan["tiers"]
 
 
 MODES = {"plan": "SM plans each GM's day", "auto": "Automatic"}
@@ -133,7 +152,7 @@ TIER_ORDER = {"hot": 0, "warm": 1, "cold": 2}
 def plan_rank(plan: dict, lead: dict) -> tuple:
     """Where a client sits in a GM's day: the SM's cohort order first, then hot / warm / cold, then heat."""
     lists = plan.get("lists") or []
-    k = list_key(lead.get("campaign"))
+    k = lead.get("_list", list_key(lead.get("campaign")))
     return (lists.index(k) if k in lists else len(lists), TIER_ORDER.get(lead.get("heat_tier") or "cold", 2),
             -(lead.get("heat_score") or 0))
 
@@ -173,7 +192,7 @@ def waiting_for_plan(ctx: Ctx) -> dict[tuple[str, str], int]:
     for l in plan_pool(ctx):
         if not engaged_enough(ctx, l):
             continue  # churned clients wait until they're warm or hot
-        k = (list_key(l["campaign"]), l["heat_tier"] or "cold")
+        k = (lead_list(ctx, l), l["heat_tier"] or "cold")
         out[k] = out.get(k, 0) + 1
     return out
 
@@ -290,9 +309,12 @@ def assign_new_leads(ctx: Ctx) -> dict:
         pool = rows(ctx.conn, "SELECT * FROM leads WHERE assigned_to IS NULL AND status='open' AND on_hold=0 "  # held: SM assigns
                               "AND COALESCE(campaign,'') NOT IN ('referral','sarthi') "  # referral asks have their own daily quota
                               f"ORDER BY {PRIORITY_SQL}, heat_score DESC, first_seen_at, lead_id")
+    if plans is not None:
+        for lead in pool:
+            lead["_list"] = lead_list(ctx, lead)  # list + age bucket, once per client
     if plans:  # SM plans: in each SM's cohort order (a payout no plan takes still goes first: money is leaving)
         def order(lead):
-            ranks = [plan_rank(p, lead) for p in plans.values() if list_key(lead.get("campaign")) in (p.get("lists") or [])]
+            ranks = [plan_rank(p, lead) for p in plans.values() if lead["_list"] in (p.get("lists") or [])]
             return min(ranks) if ranks else ((-1, 0, 0) if lead.get("campaign") == "payout" else (99, 0, 0))
         pool = sorted(pool, key=order)
     for lead in pool:

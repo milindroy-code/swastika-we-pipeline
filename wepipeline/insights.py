@@ -108,7 +108,11 @@ def referral_reward(ctx: Ctx) -> str:
 def _engaged(ctx: Ctx, lead: dict) -> str:
     from .drives import engagement
 
-    value, why = engagement(ctx, lead.get("campaign") or "referral", lead["lead_id"])
+    from . import activation  # noqa: F401  (registers the Sarthi program)
+
+    campaign = lead.get("campaign") or "referral"
+    program = "sarthi" if campaign.startswith("sarthi") else campaign if campaign == "referral" else "referral"
+    value, why = engagement(ctx, program, lead["lead_id"])
     return why.replace("campaigns (", "", 1).replace("):", ":", 1) if value > 0 else ""
 
 

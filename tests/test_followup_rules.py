@@ -172,17 +172,18 @@ def test_12b_a_deposit_below_the_target_moves_the_client_to_low_margin_and_keeps
 
 def test_12c_new_clients_past_the_registration_window_stop_being_followed_up(ctx):
     from wepipeline.followups import expire_out_of_window
-    from wepipeline.admin import save_rules, current_sla
+    from wepipeline.assign import lead_list
 
-    client(ctx, "OLD", extra={"registration_date": (TUE_1100 - timedelta(days=31)).isoformat()}, campaign="new")
+    client(ctx, "OLD", extra={"registration_date": (TUE_1100 - timedelta(days=95)).isoformat()}, campaign="new")
+    client(ctx, "LATER", extra={"registration_date": (TUE_1100 - timedelta(days=45)).isoformat()}, campaign="new")
     client(ctx, "FRESH", extra={"registration_date": (TUE_1100 - timedelta(days=10)).isoformat()}, campaign="new")
     client(ctx, "CHURN", extra={"registration_date": (TUE_1100 - timedelta(days=400)).isoformat()}, campaign="reactivation", tier="hot")
     assign(ctx)
-    assert expire_out_of_window(ctx) == 1
+    assert expire_out_of_window(ctx) == 1  # worked in two buckets, 0-30 and 31-90 days; past 90 they stop
     status = {r["lead_id"]: r["status"] for r in rows(ctx.conn, "SELECT lead_id, status FROM leads")}
-    assert status == {"OLD": "out_of_window", "FRESH": "open", "CHURN": "open"} and due(ctx, "OLD") is None
-    save_rules(ctx, {"registration_window_days": 7}, current_sla(ctx))   # admin narrows the window
-    assert expire_out_of_window(ctx) == 1 and one(ctx.conn, "SELECT status FROM leads WHERE lead_id='FRESH'")["status"] == "out_of_window"
+    assert status == {"OLD": "out_of_window", "LATER": "open", "FRESH": "open", "CHURN": "open"} and due(ctx, "OLD") is None
+    leads = {r["lead_id"]: r for r in rows(ctx.conn, "SELECT * FROM leads")}
+    assert lead_list(ctx, leads["FRESH"]) == "no_deposit" and lead_list(ctx, leads["LATER"]) == "no_deposit_90"
 
 
 # ---------------------------------------------------------------- deadlines

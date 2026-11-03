@@ -55,14 +55,14 @@ def dialer_queue(ctx: Ctx, agent_id: str) -> list[dict]:
     # overdue: not-yet-escalated first, closest to escalating first (they can still be saved);
     # then already-escalated ones, hot first. Other groups: hot first, then earliest due.
     # With SM plans, the SM's cohort order comes before priority: e.g. new clients, then low margin, then payouts.
-    from .assign import assignment_mode, day_plan, list_key
+    from .assign import assignment_mode, day_plan, lead_list
 
     order = day_plan(ctx, agent_id)["lists"] if assignment_mode(ctx) == "plan" else []
     rank = {k: i for i, k in enumerate(order)}
 
     def key(x):
         tier = 0 if x.get("campaign") == "payout" else TIER_RANK.get(x["heat_tier"] or "cold", 2)  # payouts rank with hot
-        cohort = rank.get(list_key(x.get("campaign")), len(rank))
+        cohort = rank.get(lead_list(ctx, x), len(rank)) if rank else 0
         if x["group"] == OVERDUE and not x["already_escalated"]:
             return (OVERDUE, 0, x["escalates_in"], cohort, tier, x["due"])
         return (x["group"], 1 if x["group"] == OVERDUE else 0, cohort, tier, 0, x["due"])

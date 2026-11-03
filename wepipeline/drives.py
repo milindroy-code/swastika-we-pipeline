@@ -38,7 +38,8 @@ ENGAGEMENT_DEFAULTS = {
     "scale": 12,              # engagement score = 100 * (1 - e^(-points / scale)): one reply + a click today ~ warm
 }
 TRADING_DEFAULTS = {"trades_full": 150, "trades_points": 40, "days_points": 25, "recent_days": 3, "recent_points": 10,
-                    "app_points": 15, "others_share": 0.25}
+                    "app_points": 15, "others_share": 0.25,
+                    "turnover_full": 1000000}  # ₹ traded in the window that counts as full volume (with trade count)
 
 
 @dataclass
@@ -178,19 +179,25 @@ def connection_status(ctx: Ctx) -> dict:
 
 # ---------------------------------------------------------------- scoring
 def trading_track(ctx: Ctx, data: dict, w: dict) -> tuple[float, str]:
-    """0-90 from the trade books: volume (square-root curve), consistency (share of trading days) and recency."""
+    """0-90 from the trade books: volume (trade count and, when known, ₹ traded; square-root curves), frequency (share of
+    trading days with a trade) and recency."""
     trades, days = int(data.get("total_trades") or 0), int(data.get("active_days") or 0)
+    turnover = float(data.get("turnover") or 0)
     window = int(data.get("window_days") or 60)
     trading_days = max(round(window * 5 / 7) - 2, 1)  # weekdays less a couple of exchange holidays
     last = parse_dt(data.get("last_trade"), ctx.tz)
     since = (ctx.now().date() - last.date()).days if last else None
-    value = (min(trades / w["trades_full"], 1) ** 0.5 * w["trades_points"] + min(days / trading_days, 1) * w["days_points"]
+    volume = min(trades / w["trades_full"], 1) ** 0.5
+    if turnover:  # half on how often, half on how much
+        volume = (volume + min(turnover / float(w.get("turnover_full", 1000000)), 1) ** 0.5) / 2
+    value = (volume * w["trades_points"] + min(days / trading_days, 1) * w["days_points"]
              + (w["recent_points"] if since is not None and since <= w["recent_days"]
                 else w["recent_points"] / 2 if since is not None and since <= 7 else 0))
     if not trades:
         return 0.0, ""
     when = "today" if since == 0 else f"{since} d ago" if since is not None else "n/a"
-    return value, f"{trades} trades on {days} of ~{trading_days} trading days, last {when}"
+    worth = f" (₹{turnover / 100000:,.1f} lakh traded)" if turnover >= 100000 else f" (₹{turnover:,.0f} traded)" if turnover else ""
+    return value, f"{trades} trades{worth} on {days} of ~{trading_days} trading days, last {when}"
 
 
 def combine(tracks: list[float], share: float) -> float:

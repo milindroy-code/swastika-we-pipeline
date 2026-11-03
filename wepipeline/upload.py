@@ -19,15 +19,16 @@ from .ingest import ingest_webengage_file
 
 log = logging.getLogger(__name__)
 # The analysed list a GM works from: who, what we know, why call, what to say. The rest is on the Details tab.
-BATCH_COLUMNS = [
-    ("Rank", "batch_rank"), ("Priority", "priority_score"), ("Client", "client_line"), ("Client profile", "profile"),
-    ("App activity", "activity"), ("Engagement levers", "levers"), ("Insight", "script_insight"), ("Call script", "script_text"),
-    ("Ask (call to action)", "script_ask"), ("Agar customer bole", "objections_hi"), ("When to call", "when"),
-    ("GM", "gm_assigned"), ("Status", "status_line"),
+BATCH_COLUMNS = [  # what a GM needs on the call: kept short (the full script and profile are on the Details sheet)
+    ("Rank", "batch_rank"), ("Priority", "priority_score"), ("Client", "client_line"), ("App login", "app_login"),
+    ("App surfaces used (7 d)", "app_surfaces"), ("Lever: friction / last trade", "lever"), ("Talking points", "talking_points"),
+    ("Ask", "ask"), ("When to call", "when"), ("Calls (last 7 d)", "calls_7d"), ("Calls (last 48 h)", "calls_48h"), ("Call now?", "call_now"),
+    ("Last call", "last_call"), ("GM", "gm_assigned"), ("Status", "status_line"),
 ]
 WIDTHS = {"batch_rank": 7, "priority_score": 12, "client_line": 16, "profile": 34, "activity": 40, "levers": 40,
           "script_insight": 45, "script_text": 70, "script_ask": 50, "objections_hi": 48, "when": 18, "gm_assigned": 14,
-          "status_line": 20}
+          "status_line": 20, "calls_48h": 16, "call_now": 22, "last_call": 28, "app_login": 24, "app_surfaces": 30,
+          "lever": 34, "talking_points": 60, "ask": 30, "calls_7d": 26}
 DETAIL_COLUMNS = [
     ("Rank in this list", "batch_rank"), ("Overall rank", "rank"), ("Priority", "priority"), ("Heat score", "heat"),
     ("Client code", "client"), ("Name", "name"), ("Phone", "phone"), ("Category", "category"), ("Stage", "stage"),
@@ -37,6 +38,11 @@ DETAIL_COLUMNS = [
     ("Non-core activity", "non_core_detail"), ("Best time to call", "best_time"), ("Research segments", "segments"), ("Sarthi status", "sarthi_status"),
     ("Why hot (score drivers)", "heat_reasons"), ("Engagement levers", "levers"),
     ("Call ideas (data → angle)", "call_ideas_text"), ("Close", "closing_text"), ("Agar customer bole", "objections_hi"), ("Client status", "status"),
+    ("Client profile", "profile"), ("App activity", "activity"), ("Insight", "script_insight"), ("Full call script", "script_text"),
+    ("Ask (full)", "script_ask"),
+    ("Attempts (48 h)", "attempts_48h"), ("Connects (48 h)", "connects_48h"), ("Attempts today", "attempts_today"),
+    ("Attempts (7 d)", "attempts_7d"), ("Connects (7 d)", "connects_7d"), ("Talk min (7 d)", "talk_min_7d"), ("Incoming (7 d)", "incoming_7d"),
+    ("Call now?", "call_now"), ("Last call", "last_call"),
 ]
 # What the SM says the list is: sets the category (and so the pitch stage) for customers new to the system.
 # The client database, when reachable, replaces it with the real ageing category.
@@ -72,6 +78,9 @@ def analyse_upload(ctx: Ctx, path: Path, uploaded_by: str | None = None, use_cli
     ctx.conn.execute(f"UPDATE leads SET status='open', assigned_to=NULL, assigned_at=NULL, npc_count=0, updated_at=? "
                      f"WHERE lead_id IN ({marks}) AND status='drive'", (iso(ctx.now()), *ids))  # drive-only clients: funding first
     if campaign:  # tag every customer in the file, new and already known, so the list can be filtered and handled
+        if campaign in {"new", "low_margin"}:  # the 31-90 day bucket: clients the old 30-day window closed come back
+            ctx.conn.execute(f"UPDATE leads SET status='open', assigned_to=NULL, assigned_at=NULL, npc_count=0, updated_at=? "
+                             f"WHERE lead_id IN ({marks}) AND status='out_of_window'", (iso(ctx.now()), *ids))
         if campaign in {"payout", "reactivation"}:
             # funded clients are exactly the ones who pay out or go dormant: bring them back into the follow-up flow
             ctx.conn.execute(f"UPDATE leads SET status='open', assigned_to=NULL, assigned_at=NULL, npc_count=0, updated_at=? "
@@ -248,7 +257,12 @@ def batch_rows(ctx: Ctx, client_ids: list[str]) -> list[dict]:
     """Rows for just this list, in priority order, with the rank inside the list and in the whole base."""
     from .sheet_export import build_rows
 
+    from .call_history import call_history
+
     data = build_rows(ctx, lead_ids=list(client_ids))
+    calls = call_history(ctx, [r["lead_id"] for r in data])
+    for r in data:
+        r.update(calls.get(r["lead_id"], {}))  # attempts / connects, Call now? and the last call
     data.sort(key=lambda r: (r["status"] != "open", -(r["heat"] or 0)))
     for i, r in enumerate(data, 1):
         r["batch_rank"] = i if r["status"] == "open" else ""
@@ -330,19 +344,28 @@ def _timeline_sheet(ws, data: list[dict], ctx: Ctx) -> None:
 def batch_workbook(ctx: Ctx, upload: dict) -> Workbook:
     from .timeline import timeline
 
-    data = []
+    from .talking_points import talking_points
+
+    data, leads = [], []
     for r in batch_rows(ctx, upload["client_ids"]):
         lead = one(ctx.conn, "SELECT * FROM leads WHERE lead_id=?", (r["lead_id"],)) or {"lead_id": r["lead_id"]}
+        leads.append(lead)
         r["timeline"] = timeline(ctx, lead)
         r["last_active_ago"] = r["timeline"]["last_active"]
         data.append({**r, **_sheet_view(r)})
+    label = (upload.get("summary") or {}).get("list_type") or ""
+    campaign = next((camp for key, (desc, _, camp) in LIST_TYPES.items()
+                     if camp and (f"_{key}." in (upload.get("filename") or "") or label.startswith(desc.split(" (")[0]))), None)
+    points = talking_points(ctx, leads, campaign)
+    for r in data:
+        r.update(points.get(r["lead_id"], {}))
     s = upload["summary"]
     wb = Workbook()
     ws = wb.active
     ws.title = "Analysed list"
     _write_sheet(ws, data, BATCH_COLUMNS, WIDTHS, "D2")  # rank, priority and client stay in view
     keys = [k for _, k in BATCH_COLUMNS]
-    for row in ws.iter_rows(min_row=2, min_col=keys.index("script_insight") + 1, max_col=keys.index("script_insight") + 1):
+    for row in ws.iter_rows(min_row=2, min_col=keys.index("talking_points") + 1, max_col=keys.index("talking_points") + 1):
         row[0].font = Font(name="Arial", size=10, bold=True)  # the lines a GM reads first
     n = max(len(data) + 1, 2)
     last = get_column_letter(len(BATCH_COLUMNS))
@@ -374,8 +397,13 @@ def batch_workbook(ctx: Ctx, upload: dict) -> Workbook:
         ("Not assigned yet (press Assign)", count((S, "open: waiting for assign*"))),
         ("Waiting for GM capacity", count((S, "open: waiting for capacity*"))),
         ("Re-activation: watching for engagement", count((S, "open: waiting for engagement*"))),
+        ("Not attempted in the last 48 h", count((col["calls_48h"], "0 attempts*"), (S, "open*"))),
+        ("Resting (called recently, don't call now)", count((col["call_now"], "Resting*"), (S, "open*"))),
+        ("Call now / callback due", f'={count((col["call_now"], "Call now*"), (S, "open*"))[1:]}+{count((col["call_now"], "Callback due*"), (S, "open*"))[1:]}'),
         ("Client database ageing", s.get("ageing", {}).get("detail", "")),
         ("", ""),
+        ("Calls", "From Jarvis (CRM call log; a call of 30 s or more = connected) and the dashboard. Resting = 2 attempts today, 6 in 7 days, a connect in the last 48 h "
+                  "with no callback agreed, or 3+ unanswered attempts in 48 h (rests 24 h). Back in the app after the last call = call now."),
         ("How the heat score works", "core activity ×10, non-core ×3; halves every 3 days since last done; more repeats count more "
                                      "(capped); registration counts as core. 0–100: 🔥 ≥ 70, 🌤️ ≥ 40, ❄️ below."),
         ("Compliance", "Pitch ideas never recommend specific securities or promise returns."),

@@ -156,8 +156,12 @@ def refresh_heat(ctx: Ctx) -> dict:
     now = ctx.now()
     counts = {"hot": 0, "warm": 0, "cold": 0}
     became_hot = []
+    from .call_history import call_adjustment, call_history
+
     history = scores_for(ctx)  # uploaded app-history scores (Customer list, step 4)
-    for lead in rows(ctx.conn, "SELECT * FROM leads WHERE status='open'"):
+    open_leads = rows(ctx.conn, "SELECT * FROM leads WHERE status='open'")
+    calls = call_history(ctx, [l["lead_id"] for l in open_leads])  # last 7 days of Jarvis + dashboard calls
+    for lead in open_leads:
         value, parts = score(ctx, contributions(ctx, lead_user_ids(ctx, lead)))
         reasons = "; ".join(describe(p) for p in parts[:3])
         prior = history.get(lead["lead_id"], history.get(lead.get("we_user_id") or ""))
@@ -171,6 +175,10 @@ def refresh_heat(ctx: Ctx) -> dict:
 
             value, why = program_score(ctx, lead.get("campaign"), json.loads(lead.get("extra") or "{}"), value, lead["lead_id"])
             reasons = "; ".join(x for x in (why, reasons) if x)
+        delta, why_calls = call_adjustment(ctx, calls[lead["lead_id"]], lead.get("campaign"))
+        if delta:  # fresh clients up; clients talked to enough this week down
+            value = round(min(max(value + delta, 0), 100), 1)
+            reasons = "; ".join(x for x in (f"calls: {why_calls} ({delta:+.0f})", reasons) if x)
         tier = tier_for(ctx, value)
         counts[tier] += 1
         ctx.conn.execute("UPDATE leads SET heat_score=?, heat_tier=?, heat_reasons=? WHERE lead_id=?",

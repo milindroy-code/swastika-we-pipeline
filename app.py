@@ -900,8 +900,10 @@ def pull_section(db_ok: bool) -> None:
                      help="Read-only query on the client database." if db_ok else "Client database not reachable: connect to the VPN."):
             with st.spinner("Running the query on the client database…"):
                 try:
+                    from wepipeline.cohorts import drop_funded  # holdings + withdrawals over ₹30k: funded, left out
+
                     st.session_state["pulled_list"] = {"key": source, "source": PULL_PRESETS[source], "at": ctx.now(),
-                                                       "df": pull_list(ctx, source)}
+                                                       "df": drop_funded(ctx, pull_list(ctx, source), source).reset_index(drop=True)}
                     if st.session_state.get("sm_list_type") is None:  # pre-select the matching list type for the analysis
                         st.session_state["sm_list_type"] = source
                 except Exception as e:
@@ -1164,7 +1166,7 @@ def upload_section() -> None:
                + (f" · {s['closed']} already closed (converted / not interested)" if s.get("closed") else ""))
     view = pd.DataFrame([{"Rank": r["batch_rank"], "Priority": r["priority"], "Heat": r["heat"], "Client code": r["client"],
                           "List": r["list"], "Category": r["category"], "GM": r["gm"], "First call due": r["next_due"], "Best time": r["best_time"],
-                          "Calls (7 d)": r.get("calls_7d", ""), "Calls (48 h)": r.get("calls_48h", ""), "Call now?": r.get("call_now", ""),
+                          "Calls (7 d)": r.get("calls_7d", ""), "Call now?": r.get("call_now", ""),
                           "Why": (r["levers"].split("\n")[0].lstrip("• ") if r["levers"] else ""),
                           "Top call idea": (r["call_ideas"][0]["fact"] + " → " + r["call_ideas"][0]["angle"]) if r.get("call_ideas") else ""}
                          for r in data])

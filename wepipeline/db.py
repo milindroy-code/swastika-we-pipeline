@@ -279,6 +279,34 @@ CREATE TABLE IF NOT EXISTS we_ids (
     looked_up_at TEXT NOT NULL
 );
 
+-- Clients who booked a profit recently (closed trades in the back-office trade books, profits.py): the best moment to
+-- ask for a referral.
+CREATE TABLE IF NOT EXISTS profit_bookings (
+    client_id        TEXT PRIMARY KEY,
+    net_profit       REAL NOT NULL,      -- realised profit minus losses, closed trades in the window
+    profit_closes    INTEGER NOT NULL,   -- closed trades that made money
+    closes           INTEGER NOT NULL,
+    best_scrip       TEXT,
+    best_profit      REAL,
+    best_date        TEXT,
+    last_profit_date TEXT,
+    is_central       INTEGER NOT NULL DEFAULT 0,
+    window_days      INTEGER NOT NULL,
+    pulled_at        TEXT NOT NULL
+);
+
+-- Executed orders (research DB CompletedOrders) for the dashboard's clients: the talking point names the client's last
+-- trade with its stock and time (orders.py).
+CREATE TABLE IF NOT EXISTS app_orders (
+    id        INTEGER PRIMARY KEY,       -- CompletedOrders.id
+    client_id TEXT NOT NULL,
+    symbol    TEXT,
+    side      TEXT,                      -- B / S
+    qty       REAL,
+    fill_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_app_orders_client ON app_orders(client_id, fill_at);
+
 -- Calls made from Jarvis (CRM tbl_CallLog), copied for the dashboard's clients (jarvis.py). A call of
 -- call_check.connect_seconds or more is a connect; incoming calls are kept but not counted as attempts.
 CREATE TABLE IF NOT EXISTS jarvis_calls (

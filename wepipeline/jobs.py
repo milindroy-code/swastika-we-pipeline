@@ -144,6 +144,13 @@ def tick(ctx: Ctx) -> dict:
         except Exception as e:
             log.exception("Jarvis call sync failed")
             result["jarvis_calls"] = {"error": str(e)}
+        from .orders import sync_orders
+
+        try:  # executed orders, for the talking point (the client's last trade with its stock and time)
+            result["orders"] = sync_orders(ctx)
+        except Exception as e:
+            log.exception("Order sync failed")
+            result["orders"] = {"error": str(e)}
     result["sync"] = sync(ctx)
     from .market import due_for_refresh, refresh as refresh_market
 

@@ -222,6 +222,7 @@ cohorts:
   cohorts: [no_deposit, no_deposit_90, low_margin, low_margin_90, payout, sarthi_disabled, sarthi_off, reactivation]
   later_window_days: 90    # zero / low margin: a 0-30 day list and a 31-90 day list (registration_window_days below = 30)
   centralised_only: true
+  max_holdings_plus_payouts: 30000   # zero / low margin: holdings value + cash withdrawn over this = funded, left out
   lookback_days: 15        # first fetch for a client: this many days of activity; later fetches continue from the last one
   fresh_hours: 16          # morning publish: activity fetched within this many hours is not fetched again
   refetch_after_hours: 4   # overnight fetch: refreshes everyone fetched more than this long before it started

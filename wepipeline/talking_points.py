@@ -1,12 +1,15 @@
-"""Simple talking points for a GM: what the client did in the app, and one or two lines to open the call with.
+"""One talking point for a GM: the client's most useful recent action, with the time and, where known, the stock.
 
-Per client (last 7 days of app activity, plus the back-office trade books):
-    App login     last time in the app, and on how many of the last 7 days
-    App surfaces  the parts of the app they used most (Sarthi, Search, Stock pages, Option chain, ...)
-    Lever         the friction they hit (tried adding funds, order window left without an order, ...) or else their last trade
-    Talking points  one or two lines to read out, built from the lever and the surfaces, plus the ask
-WebEngage's activity feed has no event details, so the stock name comes from the client's last trade, not from what
-they looked at. Never names a stock to buy or promises returns.
+Per client (last 7 days of app activity, executed orders, and the Sarthi ideas live at the time):
+    App login          last time in the app, and on how many of the last 7 days
+    App surfaces       the parts of the app they used most (Sarthi, Search, Stock pages, Option chain, ...)
+    Last key activity  the most important thing they did (key_activity: deposit attempt > Sarthi idea accepted > order
+                       window left without an order > trade > login trouble > help > Sarthi ideas viewed > option chain >
+                       stocks > login), the most important in the last 72 h, else in 7 days
+    Talking point      one line to open the call with, built from it; plus the ask
+WebEngage's activity feed has no event details: the stock of a trade comes from the executed orders, and a Sarthi idea
+is the one the research desk had live at that time (the app doesn't say which idea was opened). Never names a stock to
+buy or promises returns.
 """
 from __future__ import annotations
 
@@ -105,15 +108,18 @@ def _day_hi(ctx: Ctx, dt) -> str:
 def _scrip_words(scrip: str) -> str:
     """'EF HDFCBANK 23Nov2026' -> 'HDFCBANK future'; 'EO CE OIL 23Nov2026 480' -> 'OIL 480 CE option'; equity stays as is."""
     p = scrip.split()
-    if len(p) >= 3 and p[0] == "EF":
+    if len(p) >= 3 and len(p[0]) == 2 and p[0].isupper() and ("CE" in p or "PE" in p):  # any option: EO / IO / CO / NC ...
+        i = p.index("CE") if "CE" in p else p.index("PE")
+        if i + 1 < len(p):
+            strike = p[-1] if p[-1].replace(".", "").isdigit() else ""
+            return " ".join(x for x in (p[i + 1], strike, p[i], "option") if x)
+    if len(p) >= 2 and len(p[0]) == 2 and p[0].isupper() and p[0].endswith("F"):  # any future: EF / IF / CF ...
         return f"{p[1]} future"
-    if len(p) >= 4 and p[0] == "EO":
-        return f"{p[2]} {p[4] if len(p) > 4 else ''} {p[1]} option".replace("  ", " ")
     return scrip
 
 
 def talking_points(ctx: Ctx, leads: list[dict], campaign: str | None = None) -> dict[str, dict]:
-    """lead_id -> {app_login, app_surfaces, lever, talking_points, ask} for these leads. `campaign` = the list being
+    """lead_id -> {app_login, app_surfaces, key_activity, talking_point, ask} for these leads. `campaign` = the list being
     worked (new / low_margin / ...), which decides the ask; else each client's own list."""
     list_campaign = campaign
     from .sarthi import target
@@ -121,7 +127,10 @@ def talking_points(ctx: Ctx, leads: list[dict], campaign: str | None = None) -> 
     now = ctx.now()
     since = iso(now - timedelta(days=7))
     goal = int(target(ctx))
-    trades = last_trades(ctx, [l["lead_id"] for l in leads])
+    from .orders import last_orders, sarthi_ideas
+
+    orders = last_orders(ctx, [l["lead_id"] for l in leads])
+    ideas = sarthi_ideas(ctx)
     out = {}
     for lead in leads:
         lid = lead["lead_id"]
@@ -155,59 +164,87 @@ def talking_points(ctx: Ctx, leads: list[dict], campaign: str | None = None) -> 
         top = sorted(counts, key=lambda s: -counts[s])[:3]
         surfaces = " · ".join(f"{s} ({counts[s]}x)" for s in top) or "—"
 
-        # the lever: friction first, else the last trade
-        def last_of(keys):
-            hits = [t for n, t in evs if any(n.startswith(k) for k in keys)]
-            return (hits[-1], len(hits)) if hits else (None, 0)
-
-        funds_t, _ = last_of(ADD_FUNDS)
-        placed_t, _ = last_of(("ORDER_PLACED",))
-        tries = [t for n, t in evs if any(n.startswith(k) for k in ORDER_TRIED) and (not placed_t or t > placed_t)]
-        tried_t, tried_n = (tries[-1], len(tries)) if tries else (None, 0)  # order windows since the last order placed
-        help_t, _ = last_of(HELP)
-        login_fail_t, _ = last_of(("LOGIN_FAILED",))
-        trade = trades.get(lid)
-        points = []
-        if funds_t and campaign in ("new", "low_margin"):
-            lever = f"Friction: tried to add funds {_day(ctx, funds_t)} {funds_t:%H:%M}" + (", money not received" if campaign == "new" else "")
-            points.append(f"Aapne {_day_hi(ctx, funds_t)} funds add karne ki koshish ki thi. Payment mein koi dikkat aayi? "
-                          "Main abhi UPI se saath mein karwa deta hoon.")
-        elif tried_t:
-            lever = (f"Friction: opened the order window {tried_n}x without placing" + (" since their last order" if placed_t else "")
-                     + f" (last {_day(ctx, tried_t)} {tried_t:%H:%M})")
-            points.append("Aap order lagane gaye the par order place nahi hua. Kya margin kam pad raha tha? "
-                          "Funds add karke wahi trade aaram se le sakte hain.")
-        elif login_fail_t:
-            lever = f"Friction: login failed {_day(ctx, login_fail_t)} {login_fail_t:%H:%M}"
-            points.append("App mein login mein dikkat aayi thi. Main abhi login karwa deta hoon.")
-        elif help_t:
-            lever = f"Asked for help in the app {_day(ctx, help_t)} {help_t:%H:%M}"
-            points.append("Aapne app mein help ke liye tap kiya tha. Bataiye, kis cheez mein madad chahiye?")
-        elif trade:
-            lever = f"Last trade: {_scrip_words(trade['scrip'])} ({_day(ctx, trade['date']) if trade['date'] else ''})"
-            points.append(f"Aapne {_day_hi(ctx, trade['date']) if trade['date'] else 'pichhli baar'} {_scrip_words(trade['scrip'])} mein trade kiya tha. "
-                          "Kaisa raha? Agle trade ke liye margin ready rakhein.")
-        else:
-            lever = "—"
-        if len(points) < 2:  # a second line from what they use most
-            if "Sarthi ideas" in top:
-                points.append("Aap Sarthi ke ideas dekh rahe hain. Kaunsa idea pasand aaya? Margin ho toh ideas turant le sakte hain.")
-            elif "Search" in top or "Stock pages" in top:
-                points.append("Aap app pe stocks dekh rahe hain. Kis type ke trade mein interest hai, short term ya long term?")
-            elif "Option chain" in top:
-                points.append("Aap option chain dekh rahe hain. F&O ke liye margin ready ho toh Sarthi ke F&O ideas bhi milte hain.")
-            elif not evs:
-                points.append("Account khul gaya hai. App mein login ya pehla trade karne mein koi madad chahiye?")
-            elif not points:
-                points.append("Aap app regularly khol rahe hain. Trading ke liye kya plan hai? Main Sarthi ke ready ideas dikha deta hoon.")
+        key, point = key_activity(ctx, lid, evs, campaign, orders.get(lid.upper()), ideas)
         if campaign == "low_margin" and have is not None and 0 < have < goal:
             ask = f"Top up ₹{goal - have:,.0f} to reach ₹{goal:,} (has ₹{have:,.0f})"
         elif campaign == "low_margin":
             ask = f"Top up to ₹{goal:,}"
         elif campaign == "new":
-            ask = f"Add ₹{goal:,} to start (₹10,000 today is fine, book the rest as a follow-up)"
+            ask = f"₹{goal:,} se shuruaat karein (aaj ₹10,000 bhi chalega, baaki ki date callback mein set karein)"
         else:
             ask = ""
-        out[lid] = {"app_login": login, "app_surfaces": surfaces, "lever": lever,
-                    "talking_points": "\n".join(f"{i}. {p}" for i, p in enumerate(points[:2], 1)), "ask": ask}
+        out[lid] = {"app_login": login, "app_surfaces": surfaces, "key_activity": key, "talking_point": point, "ask": ask}
     return out
+
+
+# The client's most useful recent action, most important first. The talking point is built from the most important one done
+# in the last `fresh_hours`; if none, the most important in 7 days.
+DEPOSIT, SARTHI_TAKEN, ORDER_LEFT, TRADED, LOGIN_FAIL, HELP_TAP, SARTHI_SEEN, OPTIONS, STOCKS, LOGIN = range(10)
+
+
+def key_activity(ctx: Ctx, lid: str, evs: list, campaign: str, order: dict | None, ideas: list) -> tuple[str, str]:
+    """(what the client last did that matters, for the GM; one line to open the call with) from 7 days of app events,
+    their last executed order and the Sarthi ideas live at the time."""
+    from .orders import idea_live_at
+
+    now = ctx.now()
+    at = lambda t: f"{_day(ctx, t)} {t:%H:%M}"  # noqa: E731
+    hi = lambda t: f"{_day_hi(ctx, t)} {t:%H:%M} baje"  # noqa: E731
+    c = []  # (rank, time, fact, line)
+
+    def last(keys, pick=None):
+        hits = [t for n, t in evs if any(n.startswith(k) for k in keys) and (pick is None or pick(t))]
+        return hits[-1] if hits else None
+
+    if t := last(ADD_FUNDS):
+        c.append((DEPOSIT, t, f"Tried to add funds {at(t)}" + (" (no money received yet)" if campaign == "new" else ""),
+                  f"Aapne {hi(t)} funds add karne ki koshish ki thi. Payment mein koi dikkat aayi? Main abhi UPI se saath mein karwa deta hoon."))
+    if t := last(("CALL_ACCEPTED_MOB",)):
+        idea = idea_live_at(ideas, t)
+        what = f" ({idea['idea']}, {idea['segment']})" if idea else ""
+        c.append((SARTHI_TAKEN, t, f"Accepted a Sarthi idea {at(t)}" + (f"; idea live then: {idea['idea']} ({idea['segment']})" if idea else ""),
+                  f"Aapne {hi(t)} Sarthi ka idea accept kiya tha{what}. "
+                  + ("Account mein funds add karke aise ideas turant le sakte hain. Abhi UPI se karwa doon?" if campaign == "new"
+                     else "Trade le paaye? Margin ready ho toh agla idea turant le sakte hain.")))
+    placed = max([x for x in [last(("ORDER_PLACED",)), order["at"] if order else None] if x], default=None)
+    tries = [t for n, t in evs if any(n.startswith(k) for k in ORDER_TRIED) and (not placed or t > placed)]
+    if tries:
+        t = tries[-1]
+        c.append((ORDER_LEFT, t, f"Opened the order window {len(tries)}x without placing an order (last {at(t)})",
+                  f"Aap {hi(t)} order lagane gaye the par order place nahi hua. Kya margin kam pad raha tha? Funds add karke wahi trade le sakte hain."))
+    if order:
+        t, side = order["at"], "Bought" if order["side"] == "B" else "Sold"
+        c.append((TRADED, t, f"{side} {order['qty']:g} {order['symbol']} {at(t)}",
+                  f"Aapne {hi(t)} {order['symbol']} {'kharida' if order['side'] == 'B' else 'becha'} tha. "
+                  + ("Agle trade ke liye account mein funds add kar lijiye. Abhi UPI se karwa doon?" if campaign == "new"
+                     else "Kaisa raha? Agle trade ke liye margin ready rakhein.")))
+    elif t := last(("ORDER_PLACED",)):
+        c.append((TRADED, t, f"Placed an order in the app {at(t)}",
+                  f"Aapne {hi(t)} app se order lagaya tha. Kaisa raha? Agle trade ke liye margin ready rakhein."))
+    if t := last(("LOGIN_FAILED",)):
+        c.append((LOGIN_FAIL, t, f"Login failed {at(t)}", f"Aapko {hi(t)} app login mein dikkat aayi thi. Main abhi login karwa deta hoon."))
+    if t := last(HELP):
+        c.append((HELP_TAP, t, f"Tapped for help in the app {at(t)}", f"Aapne {hi(t)} app mein help ke liye tap kiya tha. Bataiye, kis cheez mein madad chahiye?"))
+    if t := last(("RECOMMENDATION_",)):
+        idea = idea_live_at(ideas, t)
+        c.append((SARTHI_SEEN, t, f"Checked Sarthi recommendations {at(t)}" + (f"; idea live then: {idea['idea']} ({idea['segment']})" if idea else ""),
+                  f"Aap {hi(t)} Sarthi ke ideas dekh rahe the" + (f", jaise {idea['idea']} ({idea['segment']})" if idea else "")
+                  + ". Kaunsa idea pasand aaya? Margin ho toh turant le sakte hain."))
+    if t := last(("OPTION_CHAIN_SCREEN_OPENED",)):
+        c.append((OPTIONS, t, f"Checked the option chain (F&O) {at(t)}",
+                  f"Aap {hi(t)} option chain dekh rahe the. F&O mein trade karna hai? Sarthi ke F&O ideas bhi milte hain."))
+    if t := last(("SEARCH_SCREEN_OPENED", "QUOTES_OPENED", "OVERVIEW_OPENED", "CHARTS_", "ADDED_TO_WATCHLIST")):
+        c.append((STOCKS, t, f"Searched / looked at stocks {at(t)}",
+                  f"Aap {hi(t)} app pe stocks dekh rahe the. Kis stock ya type ke trade mein interest hai?"))
+    if evs:
+        t = evs[-1][1]
+        c.append((LOGIN, t, f"Opened the app {at(t)}", f"Aap {hi(t)} app mein aaye the. Trading shuru karne mein koi madad chahiye?"))
+    if not c:
+        return "No app activity in the last 7 days", (
+            "Aapke account mein funds hain, par kuch din se app use nahi hua. Agla trade karne mein koi madad chahiye?"
+            if campaign == "low_margin" else "Account khul gaya hai. App mein login ya pehla trade karne mein koi madad chahiye?")
+    real = [x for x in c if x[0] != LOGIN]  # something they did beats just opening the app
+    pool = real or c
+    fresh = [x for x in pool if x[1] >= now - timedelta(hours=72)]
+    best = min(fresh or pool, key=lambda x: (x[0], -x[1].timestamp()))
+    return best[2], best[3]

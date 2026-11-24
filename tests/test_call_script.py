@@ -56,14 +56,12 @@ def test_analysed_sheet_has_simple_talking_points_and_the_full_script_in_details
     wb = batch_workbook(ctx, list_uploads(ctx)[0])
     ws = wb["Analysed list"]
     head = [c.value for c in ws[1]]
-    assert head[3:8] == ["App login", "App surfaces used (7 d)", "Lever: friction / last trade", "Talking points", "Ask"]
+    assert head[3:6] == ["Last key activity", "Talking point", "Ask"]
     row = {h: c.value for h, c in zip(head, ws[2])}
     assert row["Priority"].startswith("🔥 Hot · ") and row["Client"] == "HOTC"
-    assert row["Talking points"].startswith("1. ") and "₹30,000" in row["Ask"]
+    assert row["Talking point"].startswith("Aap") and "₹30,000" in row["Ask"]
     det = wb["Details"]
     dh = [c.value for c in det[1]]
     drow = {h: c.value for h, c in zip(dh, det[2])}
-    assert drow["Insight"].split("\n")[:2] == ["• Account khula hai par abhi tak paisa nahi daala",
-                                                "• 4 order lagane ki koshish ki, par funds na hone se nahi gaya"]
-    ins = customer_insight(ctx, one(ctx.conn, "SELECT * FROM leads WHERE lead_id='HOTC'"))
-    assert ins["script_text"] == drow["Full call script"]
+    assert "Full call script" not in dh and "Insight" not in dh and "App login" in dh  # the long script is gone
+    assert drow["Client code"] == "HOTC"

@@ -247,18 +247,22 @@ def test_churned_fetches_once_the_other_lists_are_done_and_emails_go_out(ctx, mo
     four = ctx.cfg["cohorts"]["cohorts"]
     cohorts.queue(ctx, four)
     cohorts.work_once(ctx, api)
-    cohorts.work_once(ctx, api)
-    assert mails == []  # two of three ready: no email yet
-    cohorts.work_once(ctx, api)
-    assert mails[0][:2] == (["me@x.in"], ["boss@x.in"]) and mails[0][2].startswith("Today's lists are ready")
-    assert mails[0][3] == ["no_deposit_20261022.xlsx", "low_margin_20261022.xlsx", "payout_20261022.xlsx"]
+    assert mails == []  # one margin list of two ready: no email yet
+    cohorts.work_once(ctx, api)  # both margin lists ready: one email, one sheet
+    assert mails[0][:2] == (["me@x.in"], ["boss@x.in"]) and mails[0][2].startswith("Zero and low margin lists (22 Oct): 2 clients")
+    assert mails[0][3] == ["zero_low_margin_20261022.xlsx"]
+    from openpyxl import load_workbook
+    ws = load_workbook(ctx.path(ctx.cfg["reports_dir"]) / "margin_lists_20261022.xlsx")["Zero and low margin"]
+    assert [r[0] for r in ws.iter_rows(min_row=2, values_only=True)] == ["Zero margin · 0–30 days", "Low margin · 0–30 days"]
+    cohorts.work_once(ctx, api)  # payout: the other daytime lists
+    assert len(mails) == 2 and mails[1][2].startswith("Today's lists are ready") and mails[1][3] == ["payout_20261022.xlsx"]
     cohorts.work_once(ctx, api)  # churned: the others are done, so it's fetched now (in the day) and mailed
     assert "WR1" in [c[0] for c in api.calls]
-    assert len(mails) == 2 and mails[1][2].startswith("Churned clients list is ready") and mails[1][3] == ["reactivation_20261022.xlsx"]
+    assert len(mails) == 3 and mails[2][2].startswith("Churned clients list is ready") and mails[2][3] == ["reactivation_20261022.xlsx"]
     cohorts.queue(ctx, four)
     for _ in range(4):
         cohorts.work_once(ctx, api)
-    assert len(mails) == 2  # once a day
+    assert len(mails) == 3  # once a day
 
 
 def test_a_client_on_two_lists_is_worked_on_one(ctx):
@@ -346,3 +350,17 @@ def test_daily_lists_go_before_the_sarthi_pool_and_a_pool_fetch_steps_aside(ctx,
     assert res["paused"] and res["fetched"] < 3  # stepped aside before finishing the cohort
     run = one(ctx.conn, "SELECT status, step FROM cohort_runs WHERE cohort='sarthi_pool:new'")
     assert run["status"] == "queued" and run["step"].startswith("Paused")
+
+
+def test_zero_and_low_margin_leave_out_clients_with_holdings_plus_withdrawals_over_the_target(ctx, monkeypatch):
+    from wepipeline import clientdb
+
+    monkeypatch.setattr(clientdb, "pull_list", lambda c, base, window=None: pd.DataFrame(
+        {"CLIENT_ID": ["KEEP", "HOLDS", "WITHDREW", "BOTH"], "IsCentralized": [1, 1, 1, 1], "DaysSinceRegistration": [5, 5, 5, 5]}))
+    monkeypatch.setattr(clientdb, "holdings_and_payouts", lambda c, ids, days: {
+        "KEEP": {"holdings": 5000, "payouts": 0}, "HOLDS": {"holdings": 250000, "payouts": 0},
+        "WITHDREW": {"holdings": 0, "payouts": 31000}, "BOTH": {"holdings": 20000, "payouts": 15000}})
+    assert cohorts.pull_cohort(ctx, "low_margin")["CLIENT_ID"].tolist() == ["KEEP"]
+    assert cohorts.pull_cohort(ctx, "no_deposit")["CLIENT_ID"].tolist() == ["KEEP"]
+    monkeypatch.setattr(clientdb, "holdings_and_payouts", lambda c, ids, days: (_ for _ in ()).throw(RuntimeError("down")))
+    assert len(cohorts.pull_cohort(ctx, "low_margin")) == 4  # the filter is skipped, the list still goes out

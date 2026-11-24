@@ -187,6 +187,25 @@ ORDER BY F.LTD DESC""",
 }
 
 
+def holdings_and_payouts(ctx: Ctx, client_ids: list[str], days: int) -> dict[str, dict]:
+    """client -> {holdings (₹, client DB), payouts (₹ withdrawn in the last `days`, back-office ledger)} for these clients."""
+    out = {}
+    ids = [str(c).strip().upper() for c in client_ids if str(c).strip()]
+    for i in range(0, len(ids), 500):
+        chunk = ",".join("'" + c.replace("'", "") + "'" for c in ids[i:i + 500])
+        df = _query(ctx, f"""
+SELECT UPPER(LTRIM(RTRIM(C.CLIENT_ID))) AS c, ISNULL(F.Holdings, 0) AS h, ISNULL(P.Payouts, 0) AS p
+FROM [Repl_TargetReview].[dbo].[tbl_ClientNew] C
+LEFT JOIN [Repl_TargetReview].[dbo].[tbl_ClientFtdLtd] F ON F.CLIENT_ID = C.CLIENT_ID
+LEFT JOIN (SELECT ACCOUNTCODE, SUM(ISNULL(DR_AMT, 0)) AS Payouts FROM [192.168.0.18].Capsfo.dbo.FA_TRANSACTIONS
+           WHERE TRANS_TYPE = 'p' AND VOUCHERDATE >= DATEADD(DAY, -{int(days)}, CAST(GETDATE() AS DATE)) AND ACCOUNTCODE IN ({chunk})
+           GROUP BY ACCOUNTCODE) P ON P.ACCOUNTCODE = C.CLIENT_ID
+WHERE C.CLIENT_ID IN ({chunk})""")
+        for r in df.itertuples(index=False):
+            out[r.c] = {"holdings": float(r.h or 0), "payouts": float(r.p or 0)}
+    return out
+
+
 def list_query(ctx: Ctx, list_type: str, window: int | None = None) -> str | None:
     """The read-only query behind a list type, with its parameters filled in. None when there is no query yet (payouts).
     `window` replaces the registration window (the later age bucket pulls up to 90 days and keeps 31-90)."""

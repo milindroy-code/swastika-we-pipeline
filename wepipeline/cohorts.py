@@ -324,7 +324,27 @@ def pull_cohort(ctx: Ctx, cohort: str) -> pd.DataFrame:
         df = pull_list(ctx, cohort)
     if settings(ctx)["centralised_only"] and "IsCentralized" in df:
         df = df[df["IsCentralized"].fillna(0).astype(int) == 1]
-    return df.reset_index(drop=True)
+    return drop_funded(ctx, df, base).reset_index(drop=True)
+
+
+def drop_funded(ctx: Ctx, df: pd.DataFrame, list_type: str) -> pd.DataFrame:
+    """Zero / low margin: leave out clients whose holdings + cash already withdrawn are over max_holdings_plus_payouts
+    (₹30,000): they are funded, not a funding call. Used by the daily lists and the dashboard's "Get the client list"."""
+    from .clientdb import holdings_and_payouts
+    from .sarthi import later_window_days
+
+    if list_type not in ("no_deposit", "low_margin") or not len(df) or "CLIENT_ID" not in df:
+        return df
+    cap = float(settings(ctx).get("max_holdings_plus_payouts", 30000))
+    try:
+        hp = holdings_and_payouts(ctx, df["CLIENT_ID"].astype(str).tolist(), later_window_days(ctx) + 7)
+        over = {c for c, v in hp.items() if v["holdings"] + v["payouts"] > cap}
+        if over:
+            log.info("%s: %s client(s) left out, holdings + withdrawals over ₹%s", list_type, len(over), f"{cap:,.0f}")
+        return df[~df["CLIENT_ID"].astype(str).str.upper().isin(over)]
+    except Exception as e:  # the list still goes out; the filter is a refinement
+        log.warning("%s: holdings / payout filter skipped: %s", list_type, e)
+        return df
 
 
 def _list_file(ctx: Ctx, cohort: str, df: pd.DataFrame) -> Path:
@@ -441,6 +461,12 @@ def run_cohort(ctx: Ctx, run: dict, api: Api | None = None) -> dict:
             _retry_locked(ctx, lambda: sync_calls(ctx), tries=4)
         except Exception as e:
             log.warning("Jarvis call sync before scoring skipped: %s", e)
+        try:  # and the latest executed orders, for the talking point
+            from .orders import sync_orders
+
+            _retry_locked(ctx, lambda: sync_orders(ctx), tries=4)
+        except Exception as e:
+            log.warning("Order sync before scoring skipped: %s", e)
         summary = _retry_locked(ctx, lambda: analyse_upload(ctx, path, uploaded_by="system", use_client_db=True,
                                                             list_type=list_type_of(cohort)), tries=4)
         if summary.get("error"):
@@ -514,8 +540,74 @@ def _recipients(ctx: Ctx) -> dict[str, list[str]]:
     return out
 
 
+MARGIN_LISTS = ["no_deposit", "low_margin", "no_deposit_90", "low_margin_90"]  # zero / low margin, newest bucket first
+
+
+def margin_workbook(ctx: Ctx, runs: list[dict]) -> tuple[bytes, int, dict]:
+    """The zero and low margin lists in ONE sheet: a List column, then each list's analysed columns, ranked within the list.
+    Also saved to data/reports/margin_lists_<date>.xlsx."""
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    from .upload import BATCH_COLUMNS, TIER_FILL, WIDTHS, batch_workbook, list_uploads
+
+    folder = ctx.path(ctx.cfg.get("reports_dir", "data/reports"))
+    saved = folder / f"margin_lists_{ctx.today():%Y%m%d}.xlsx"
+    meta = saved.with_suffix(".json")
+    key = [r["upload_id"] for r in runs]
+    if saved.exists() and meta.exists():  # built already for these same lists (e.g. while the email can't go out yet)
+        m = json.loads(meta.read_text(encoding="utf-8"))
+        if m.get("uploads") == key:
+            return saved.read_bytes(), m["total"], m["counts"]
+    ups = {u["id"]: u for u in list_uploads(ctx)}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Zero and low margin"
+    head = ["List"] + [h for h, _ in BATCH_COLUMNS]
+    ws.append(head)
+    counts = {}
+    for r in runs:
+        up = ups.get(r["upload_id"])
+        if not up:
+            continue
+        sheet = batch_workbook(ctx, up)["Analysed list"]
+        n = 0
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if any(v not in (None, "") for v in row):
+                ws.append([TITLES.get(r["cohort"], r["cohort"])] + list(row))
+                n += 1
+        counts[r["cohort"]] = n
+    widths = {"List": 22, **{h: WIDTHS.get(k, 13) for h, k in BATCH_COLUMNS}}
+    for i, h in enumerate(head, 1):
+        ws.column_dimensions[get_column_letter(i)].width = widths.get(h, 13)
+    for c in ws[1]:
+        c.font = Font(name="Arial", bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F3A5F")
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    pri = head.index("Priority")
+    for row in ws.iter_rows(min_row=2):
+        fill = next((f for t, f in TIER_FILL.items() if str(row[pri].value or "").startswith(t)), None)
+        for c in row:
+            c.font = Font(name="Arial", size=10)
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+            if fill:
+                c.fill = PatternFill("solid", fgColor=fill)
+    ws.freeze_panes = "E2"  # list, rank, priority and client stay in view
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(head))}{max(ws.max_row, 2)}"
+    buf = io.BytesIO()
+    wb.save(buf)
+    folder.mkdir(parents=True, exist_ok=True)
+    saved.write_bytes(buf.getvalue())
+    meta.write_text(json.dumps({"uploads": key, "total": sum(counts.values()), "counts": counts}), encoding="utf-8")
+    return buf.getvalue(), sum(counts.values()), counts
+
+
 def send_list_reports(ctx: Ctx) -> list[str]:
-    """Once a day: one email when the main lists are all ready, then one per night-only list (churned) when it is."""
+    """Once a day: the zero and low margin lists in one sheet as soon as those four are ready; then one email when the
+    other daytime lists are ready; then one per night-only list (churned) when it is."""
     from .jobs import _mark, _ran
     from .notify import send_mail
 
@@ -527,7 +619,20 @@ def send_list_reports(ctx: Ctx) -> list[str]:
     if not rep.get("enabled") or not rep["to"]:
         return []
     today, sent = ctx.today(), []
-    main = [c for c in s["cohorts"] if c not in s["night_only"]]
+    margin = [c for c in MARGIN_LISTS if c in s["cohorts"]]
+    mruns = [_ready_today(ctx, c) for c in margin]
+    if margin and all(mruns) and not _ran(ctx, "cohort_mail_margin", today):
+        data, total, counts = margin_workbook(ctx, mruns)
+        body = (f"Today's zero and low margin lists are ready, in one sheet ({total:,} clients):\n\n"
+                + "\n".join(f"- {TITLES[c]}: {counts.get(c, 0):,}" for c in margin)
+                + "\n\nEach row has the client's priority (hot / warm / cold), app activity, the lever (friction or last trade), "
+                  "1-2 talking points, the ask, and calls in the last 7 days with Call now?. Filter on the List and Priority "
+                  "columns; for the 31-90 day lists, start with hot and warm.\n")
+        if send_mail(ctx, rep["to"], f"Zero and low margin lists ({today:%d %b}): {total:,} clients", body, rep.get("cc"),
+                     [(f"zero_low_margin_{today:%Y%m%d}.xlsx", data)]):
+            _mark(ctx, "cohort_mail_margin", today)
+            sent.append("margin")
+    main = [c for c in s["cohorts"] if c not in s["night_only"] and c not in margin]
     runs = [_ready_today(ctx, c) for c in main]
     if main and all(runs) and not _ran(ctx, "cohort_mail_main", today):
         body, files = _list_mail(ctx, runs)

@@ -156,7 +156,13 @@ def referral_score(ctx: Ctx, extra: dict, app_heat: float = 0, user_id: str | No
         history *= max(0.5 ** (age / w["history_half_life_days"]), w["history_floor"])
     engaged, why_engaged = engagement(ctx, user_id) if user_id else (0.0, "")
     score = drives.combine([activity, history, engaged], w["others_share"])
-    bits = [why_trading] if why_trading else []
+    from .profits import boost
+
+    profit_pts, why_profit = boost(ctx, user_id) if user_id else (0.0, "")
+    if profit_pts:  # just booked a profit: the best moment to ask
+        score = round(min(score + profit_pts, 100), 1)
+    bits = [f"{why_profit} (+{profit_pts:.0f})"] if profit_pts else []
+    bits += [why_trading] if why_trading else []
     if app_heat >= 1:
         bits.append(f"app heat {app_heat:.0f}")
     if referred:
@@ -389,6 +395,13 @@ def refresh(ctx: Ctx, force: bool = False) -> dict:
     conn = connection_status(ctx)
     if not conn["ok"]:
         return {"status": "unreachable", "detail": conn["detail"]}
+    from . import profits
+
+    try:  # who booked a profit lately (the referral score uses it)
+        profit = profits.pull(ctx)
+    except Exception as e:
+        log.warning("Profit bookings skipped: %s", e)
+        profit = {"error": str(e)}
     history = load_history(ctx, pull_history(ctx), source="client DB")  # first, so proven referrers stay in the pool
     base_df = pull_base(ctx)
     base = load_profiles(ctx, base_df, source="client DB")           # the engaged base: C2-C5
@@ -399,7 +412,7 @@ def refresh(ctx: Ctx, force: bool = False) -> dict:
     others = load_profiles(ctx, pull_profiles(ctx, rest), add_engaged=False) if rest else {}
     done = drives.mark_refresh(ctx, CAMPAIGN, {"referrers": history["referrers"], "traders": pool["eligible"], "engaged_base": base["engaged"],
                                                "added": pool["added"] + history["added"] + base["added"], "dropped": pool.get("dropped", 0)})
-    return {"status": "ok", "history": history, "pool": pool, "base": base, "profiles": others, "last": done}
+    return {"status": "ok", "history": history, "pool": pool, "base": base, "profiles": others, "profits": profit, "last": done}
 
 
 def refresh_results(ctx: Ctx) -> dict:

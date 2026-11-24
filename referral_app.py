@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from wepipeline import drives, referral
+from wepipeline import drives, profits, referral
 from wepipeline.context import parse_dt
 from wepipeline.db import one, open_ctx, rows
 from wepipeline.heat import TIER_BADGE
@@ -52,7 +52,7 @@ team = ctx.team()
 labels = {m["id"]: f"{m['name']} · {'SM' if ctx.is_sm(m) else 'GM'}" for m in team}
 me_id = st.sidebar.selectbox("You are", list(labels), format_func=labels.get)
 is_sm = ctx.is_sm(ctx.member(me_id))
-pages = (["📊 Campaign report", "Overview", "Build the list", "Campaign & drives", "Business (RM) list", "Referrals collected"] if is_sm
+pages = (["📊 Campaign report", "💰 Booked a profit", "Overview", "Build the list", "Campaign & drives", "Business (RM) list", "Referrals collected"] if is_sm
          else ["My referral calls", "My referrals"])
 page = st.sidebar.radio("Page", pages)
 s = referral.settings(ctx)
@@ -429,6 +429,61 @@ def collected(agent_id: str | None = None) -> None:
     st.caption("These friends are leads (not yet registered): hand them to whoever onboards new sign-ups.")
 
 
+def profit_page() -> None:
+    """Clients who just booked a profit: the best moment to ask for a referral."""
+    ps = profits.settings(ctx)
+    st.subheader("💰 Clients who just booked a profit")
+    st.caption(f"From the back-office trade books: closed equity and F&O trades in the last {ps['days']} days, net profit of "
+               f"₹{ps['min_profit']:,} or more. The books are processed overnight, so the latest closes are yesterday's. A stock sold "
+               f"by {ps['bulk_clients']:,}+ clients on one day (an IPO listing, a corporate action) is left out. A profit in the last "
+               f"{ps['fresh_days']} days adds up to {ps['points']} points to the referral score, so these clients come first in a drive.")
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    scope = c1.segmented_control("Clients", list(referral.SCOPES), default="central", format_func=referral.SCOPES.get, key="pb_scope") or "all"
+    days = c2.selectbox("Booked in the last", [1, 2, 3, 5, 7], index=2, format_func=lambda d: f"{d} day{'s' * (d > 1)}", key="pb_days")
+    floor = c3.number_input("Min profit (₹)", 0, 10_000_000, int(ps["min_profit"]), 1000, key="pb_min")
+    hide = c4.toggle("Hide asked recently", True, key="pb_hide")
+    last = profits.last_pull(ctx)
+    b1, b2 = st.columns([4, 1])
+    b1.caption(f"Profits last pulled {fmt(last)}" if last else "Not pulled yet.")
+    if b2.button("🔄 Pull latest profits", width="stretch", key="pb_pull"):
+        with st.spinner("Reading the trade books…"):
+            try:
+                res = profits.pull(ctx)
+                referral.refresh_scores(ctx)
+                st.toast(f"{res['clients']:,} clients booked a profit ({res['central']:,} centralised); latest close {res['latest_close']}")
+            except Exception as e:
+                st.error(f"Couldn't read the trade books: {e}")
+        st.rerun()
+    t = [x for x in profits.targets(ctx, scope, days, floor) if not (hide and x["asked_recently"])]
+    if not t:
+        st.info("Nobody matches. Widen the days, lower the minimum profit, or pull the latest profits.")
+        return
+    yesterday = (ctx.today() - timedelta(days=1)).isoformat()
+    k = st.columns(5)
+    k[0].metric("Clients", f"{len(t):,}")
+    k[1].metric("Booked yesterday or today", f"{sum(1 for x in t if x['last_profit_date'] >= yesterday):,}")
+    k[2].metric("In the referral pool", f"{sum(x['in_pool'] for x in t):,}")
+    k[3].metric("Referred before · were referred", f"{sum(1 for x in t if x['referred_count'])} · {sum(1 for x in t if x['referred_by'])}")
+    k[4].metric("With a GM now", f"{sum(1 for x in t if x['assigned_to']):,}")
+    view = pd.DataFrame([{
+        "Client": x["client_id"], "Name": x["name"], "Net profit (₹)": round(x["net_profit"]),
+        "Best trade": f"{x['best_scrip']} +₹{x['best_profit']:,.0f} ({parse_dt(x['best_date'], ctx.tz):%d %b})" if x["best_scrip"] else "",
+        "Last profit": parse_dt(x["last_profit_date"], ctx.tz).strftime("%d %b"), "Winning closes": f"{x['profit_closes']} of {x['closes']}",
+        "Referred before": (f"{x['referred_count']} ({x['referred_traded']} traded)" if x["referred_count"] else ""),
+        "Was referred by": x["referred_by"],
+        "Referral priority": TIER_BADGE.get(x["heat_tier"], "not in pool") if x["in_pool"] else "not in pool",
+        "Score": round(x["heat_score"]) if x["heat_score"] is not None else None,
+        "GM": gm_name(x["assigned_to"]) if x["assigned_to"] else "", "Asked": fmt(x["asked_at"], "%d %b") if x["asked_at"] else "",
+        "Opening line": profits.talking_point(ctx, x["client_id"]),
+    } for x in t])
+    st.dataframe(view, hide_index=True, width="stretch", height=480,
+                 column_config={"Net profit (₹)": st.column_config.NumberColumn(format="₹%d"),
+                                "Opening line": st.column_config.TextColumn(width="large")})
+    st.download_button("Download (CSV)", view.to_csv(index=False).encode("utf-8-sig"), f"profit_bookers_{ctx.today():%Y%m%d}.csv", "text/csv")
+    st.caption("Not in the pool: traded, but not picked up by the pool's rules yet. Start a drive on \"Campaign & drives\": "
+               "profit bookers in the pool come first because of the score boost.")
+
+
 # ---------------------------------------------------------------- GM page
 OUTCOMES = [("referral_given", "🤝 Gave referral(s)", True), ("interested", "✅ Will share later", True),
             ("not_interested", "🙅 Not interested", True), ("not_picked", "📵 Not picked up", False),
@@ -467,6 +522,9 @@ def my_calls(agent_id: str) -> None:
                 st.link_button("📞 Call", f"tel:+91{c['phone']}", type="primary")
             else:
                 st.caption(f"No phone in the data: dial client code {lid} from the back office.")
+            opener = profits.talking_point(ctx, lid, referral.reward_hi(s))
+            if opener:
+                st.success("**💰 Just booked a profit: open with this**  \n" + opener)
             ins = customer_insight(ctx, c)
             st.markdown("**💡 Call ideas**\n" + "\n".join(f"- **{i['fact']}** → {i['angle']}" for i in ins["call_ideas"]))
             st.markdown("**🎯 Ask**\n" + "\n".join(f"- {x}" for x in ins["closing"]))
@@ -509,6 +567,8 @@ def my_calls(agent_id: str) -> None:
 
 if page == "📊 Campaign report":
     campaign_report_page()
+elif page == "💰 Booked a profit":
+    profit_page()
 elif page == "Overview":
     overview()
 elif page == "Build the list":
